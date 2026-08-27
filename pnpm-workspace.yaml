@@ -1,0 +1,8 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+verifyDepsBeforeRun: false
+overrides:
+  '@assistant-ui/tap': 0.9.6
+allowBuilds:
+  '@openuidev/lang-core': true
