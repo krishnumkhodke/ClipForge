@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import type { ChangeEvent } from "react";
+import type { CSSProperties, ChangeEvent } from "react";
 import {
   TrueForgeUI,
   type TrueForgeServerConfig,
@@ -17,8 +17,18 @@ const DEFAULT_VIDEO_ASPECT_RATIO = 9 / 16;
 const PREVIEW_BASE_WIDTH = 192;
 const LANDSCAPE_TARGET_HEIGHT = 180;
 const LANDSCAPE_MAX_WIDTH = 360;
+const PREVIEW_TOP_OFFSET = 48;
+const PREVIEW_BOTTOM_MARGIN = 16;
+const PREVIEW_FILENAME_HEIGHT = 30;
+const PREVIEW_ERROR_HEIGHT = 44;
+const MIN_PREVIEW_FRAME_HEIGHT = 120;
+const VIDEO_FILE_EXTENSIONS = /\.(avi|m4v|mkv|mov|mp4|ogg|ogv|webm)$/i;
 
-function getPreviewWidth(aspectRatio: number | null) {
+function isLikelyVideoFile(file: File) {
+  return file.type.startsWith("video/") || VIDEO_FILE_EXTENSIONS.test(file.name);
+}
+
+function getTargetPreviewWidth(aspectRatio: number | null) {
   if (!aspectRatio || aspectRatio <= 1) {
     return PREVIEW_BASE_WIDTH;
   }
@@ -29,13 +39,58 @@ function getPreviewWidth(aspectRatio: number | null) {
   );
 }
 
+function getPreviewStyle({
+  aspectRatio,
+  hasError,
+  hasFilename,
+  viewportHeight,
+}: {
+  aspectRatio: number;
+  hasError: boolean;
+  hasFilename: boolean;
+  viewportHeight: number | null;
+}): CSSProperties {
+  const targetWidth = getTargetPreviewWidth(aspectRatio);
+
+  if (!viewportHeight) {
+    return {
+      width: `min(calc(100vw - 1.5rem), ${targetWidth}px)`,
+    };
+  }
+
+  const previewChromeHeight =
+    PREVIEW_TOP_OFFSET +
+    PREVIEW_BOTTOM_MARGIN +
+    (hasFilename ? PREVIEW_FILENAME_HEIGHT : 0) +
+    (hasError ? PREVIEW_ERROR_HEIGHT : 0);
+  const maxFrameHeight = Math.max(
+    MIN_PREVIEW_FRAME_HEIGHT,
+    viewportHeight - previewChromeHeight,
+  );
+
+  return {
+    width: `min(calc(100vw - 1.5rem), ${Math.min(
+      targetWidth,
+      maxFrameHeight * aspectRatio,
+    )}px)`,
+  };
+}
+
 export function TrueForgeChat() {
   const [focusedVideo, setFocusedVideo] = useState<FocusedVideo | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
   const focusedVideoUrlRef = useRef<string | null>(null);
+  const uploadAttemptRef = useRef(0);
   const videoInputId = useId();
   const focusedVideoAspectRatio =
     focusedVideo?.aspectRatio ?? DEFAULT_VIDEO_ASPECT_RATIO;
-  const focusedVideoWidth = getPreviewWidth(focusedVideo?.aspectRatio ?? null);
+  const previewStyle = getPreviewStyle({
+    aspectRatio: focusedVideoAspectRatio,
+    hasError: Boolean(uploadError),
+    hasFilename: Boolean(focusedVideo),
+    viewportHeight,
+  });
 
   const server = useMemo<TrueForgeServerConfig>(
     () => ({
@@ -46,7 +101,13 @@ export function TrueForgeChat() {
   );
 
   useEffect(() => {
+    const updateViewportHeight = () => setViewportHeight(window.innerHeight);
+
+    updateViewportHeight();
+    window.addEventListener("resize", updateViewportHeight);
+
     return () => {
+      window.removeEventListener("resize", updateViewportHeight);
       if (focusedVideoUrlRef.current) {
         URL.revokeObjectURL(focusedVideoUrlRef.current);
       }
@@ -60,30 +121,68 @@ export function TrueForgeChat() {
       return;
     }
 
-    if (focusedVideoUrlRef.current) {
-      URL.revokeObjectURL(focusedVideoUrlRef.current);
+    uploadAttemptRef.current += 1;
+    const uploadAttempt = uploadAttemptRef.current;
+
+    if (!isLikelyVideoFile(file)) {
+      setUploadError("Choose a video file such as MP4, MOV, or WebM.");
+      event.target.value = "";
+      return;
     }
 
     const url = URL.createObjectURL(file);
-    focusedVideoUrlRef.current = url;
-    setFocusedVideo({
-      aspectRatio: null,
-      name: file.name,
-      url,
-    });
-
     const metadataVideo = document.createElement("video");
     metadataVideo.preload = "metadata";
+    metadataVideo.onloadedmetadata = null;
+    metadataVideo.onerror = null;
+
+    const cleanupMetadataVideo = () => {
+      metadataVideo.onloadedmetadata = null;
+      metadataVideo.onerror = null;
+      metadataVideo.removeAttribute("src");
+      metadataVideo.load();
+    };
+
     metadataVideo.onloadedmetadata = () => {
+      if (uploadAttempt !== uploadAttemptRef.current) {
+        URL.revokeObjectURL(url);
+        cleanupMetadataVideo();
+        return;
+      }
+
       const hasDimensions =
         metadataVideo.videoWidth > 0 && metadataVideo.videoHeight > 0;
-      const aspectRatio = hasDimensions
-        ? metadataVideo.videoWidth / metadataVideo.videoHeight
-        : null;
 
-      setFocusedVideo((currentVideo) =>
-        currentVideo?.url === url ? { ...currentVideo, aspectRatio } : currentVideo,
-      );
+      if (!hasDimensions) {
+        URL.revokeObjectURL(url);
+        setUploadError("This video has no readable dimensions. Choose another file.");
+        cleanupMetadataVideo();
+        return;
+      }
+
+      if (focusedVideoUrlRef.current) {
+        URL.revokeObjectURL(focusedVideoUrlRef.current);
+      }
+
+      focusedVideoUrlRef.current = url;
+      setFocusedVideo({
+        aspectRatio: metadataVideo.videoWidth / metadataVideo.videoHeight,
+        name: file.name,
+        url,
+      });
+      setUploadError(null);
+      cleanupMetadataVideo();
+    };
+
+    metadataVideo.onerror = () => {
+      if (uploadAttempt === uploadAttemptRef.current) {
+        setUploadError(
+          "This video could not be loaded. Try an MP4, MOV, or WebM file.",
+        );
+      }
+
+      URL.revokeObjectURL(url);
+      cleanupMetadataVideo();
     };
     metadataVideo.src = url;
 
@@ -101,12 +200,8 @@ export function TrueForgeChat() {
       />
       <section
         aria-label="Focused video"
-        className="fixed right-3 top-12 z-50 w-40 overflow-hidden rounded-lg border border-black/10 bg-white/95 shadow-lg shadow-black/10 backdrop-blur sm:right-5 sm:w-48"
-        style={
-          focusedVideo
-            ? { width: `min(calc(100vw - 1.5rem), ${focusedVideoWidth}px)` }
-            : undefined
-        }
+        className="fixed right-3 top-12 z-50 max-h-[calc(100dvh-4rem)] w-40 overflow-y-auto overflow-x-hidden rounded-lg border border-black/10 bg-white/95 shadow-lg shadow-black/10 backdrop-blur sm:right-5 sm:w-48"
+        style={previewStyle}
       >
         <input
           id={videoInputId}
@@ -128,6 +223,11 @@ export function TrueForgeChat() {
                 controls
                 playsInline
                 preload="metadata"
+                onError={() =>
+                  setUploadError(
+                    "This video cannot be played here. Choose a different file.",
+                  )
+                }
               />
             </div>
             <label
@@ -140,17 +240,32 @@ export function TrueForgeChat() {
             <div className="truncate border-t border-black/10 px-2 py-1.5 text-xs font-medium text-neutral-700">
               {focusedVideo.name}
             </div>
+            {uploadError ? (
+              <p className="border-t border-red-200 bg-red-50 px-2 py-2 text-xs leading-snug text-red-700">
+                {uploadError}
+              </p>
+            ) : null}
           </div>
         ) : (
-          <label
-            aria-label="Upload video"
-            className="flex aspect-[9/16] w-full cursor-pointer items-center justify-center bg-neutral-50 text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-900"
-            htmlFor={videoInputId}
-          >
-            <span aria-hidden="true" className="text-4xl font-light leading-none">
-              +
-            </span>
-          </label>
+          <>
+            <label
+              aria-label="Upload video"
+              className="flex aspect-[9/16] w-full cursor-pointer items-center justify-center bg-neutral-50 text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-900"
+              htmlFor={videoInputId}
+            >
+              <span
+                aria-hidden="true"
+                className="text-4xl font-light leading-none"
+              >
+                +
+              </span>
+            </label>
+            {uploadError ? (
+              <p className="border-t border-red-200 bg-red-50 px-2 py-2 text-xs leading-snug text-red-700">
+                {uploadError}
+              </p>
+            ) : null}
+          </>
         )}
       </section>
     </main>
