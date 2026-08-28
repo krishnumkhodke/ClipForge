@@ -2,6 +2,7 @@
   "$schema": "https://turborepo.dev/schema.json",
   "globalEnv": [
     "CLIPFORGE_API_BASE_URL",
+    "FFMPEG_PATH",
     "MEDIA_ALLOWED_ORIGINS",
     "MEDIA_API_BASE_URL",
     "MEDIA_DATA_DIR",
@@ -9,6 +10,9 @@
     "NEXT_PUBLIC_CLIPFORGE_API_BASE_URL",
     "NEXT_PUBLIC_MEDIA_API_BASE_URL",
     "NEXT_PUBLIC_MEDIA_MAX_UPLOAD_BYTES",
+    "OPENAI_API_KEY",
+    "OPENAI_TRANSCRIPTION_LANGUAGE",
+    "OPENAI_TRANSCRIPTION_MODEL",
     "TRUEFORGE_BASE_URL"
   ],
   "ui": "tui",

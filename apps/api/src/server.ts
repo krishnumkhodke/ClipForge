@@ -1,6 +1,6 @@
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
-import Fastify from "fastify";
+import Fastify, { type FastifyReply } from "fastify";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
@@ -8,15 +8,15 @@ import process from "node:process";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
-
-type UploadMetadata = {
-  byteLength: number;
-  createdAt: string;
-  id: string;
-  mimeType: string;
-  originalFilename: string;
-  sourcePath: string;
-};
+import { z } from "zod";
+import {
+  AudioExtractionError,
+  TranscriptionConfigurationError,
+  TranscriptionProviderError,
+  transcribeUpload,
+  type Transcript,
+  type UploadMetadata,
+} from "./transcription.js";
 
 const apiRoot = fileURLToPath(new URL("..", import.meta.url));
 const dataRoot = process.env.MEDIA_DATA_DIR ?? join(apiRoot, ".data");
@@ -48,7 +48,10 @@ const videoFileExtensions = new Set([
 ]);
 
 function isVideoUpload(filename: string, mimeType: string) {
-  return mimeType.startsWith("video/") || videoFileExtensions.has(extname(filename).toLowerCase());
+  return (
+    mimeType.startsWith("video/") ||
+    videoFileExtensions.has(extname(filename).toLowerCase())
+  );
 }
 
 function sanitizeFilename(filename: string) {
@@ -63,10 +66,119 @@ function getUploadMetadataPath(uploadId: string) {
   return join(getUploadDirectory(uploadId), "metadata.json");
 }
 
+function getUploadTranscriptPath(uploadId: string) {
+  return join(getUploadDirectory(uploadId), "transcript.json");
+}
+
 async function readUploadMetadata(uploadId: string) {
-  const contents = await readFile(getUploadMetadataPath(uploadId), "utf8");
+  const contents = await readFile(getUploadMetadataPath(uploadId), "utf8").catch(
+    (error: unknown) => {
+      if (isFileNotFoundError(error)) {
+        throw new UploadNotFoundError(uploadId);
+      }
+
+      throw error;
+    },
+  );
 
   return JSON.parse(contents) as UploadMetadata;
+}
+
+async function readUploadTranscript(uploadId: string) {
+  const contents = await readFile(getUploadTranscriptPath(uploadId), "utf8");
+
+  return JSON.parse(contents) as Transcript;
+}
+
+async function createOrReadTranscript(uploadId: string, regenerate: boolean) {
+  const metadata = await readUploadMetadata(uploadId);
+
+  if (!regenerate) {
+    try {
+      return {
+        cached: true,
+        transcript: await readUploadTranscript(uploadId),
+      };
+    } catch (error) {
+      if (!isFileNotFoundError(error)) {
+        throw error;
+      }
+
+      // Cache misses fall through to provider-backed transcription.
+    }
+  }
+
+  const transcript = await transcribeUpload(
+    metadata,
+    getUploadDirectory(uploadId),
+  );
+
+  await writeFile(
+    getUploadTranscriptPath(uploadId),
+    `${JSON.stringify(transcript, null, 2)}\n`,
+    "utf8",
+  );
+
+  return {
+    cached: false,
+    transcript,
+  };
+}
+
+function parseRegenerateQuery(value: unknown) {
+  return value === true || value === "true";
+}
+
+function sendTranscriptionError(reply: FastifyReply, error: unknown) {
+  if (error instanceof TranscriptionConfigurationError) {
+    return reply.code(503).send({
+      error: "transcription_not_configured",
+      message: error.message,
+    });
+  }
+
+  if (error instanceof TranscriptionProviderError) {
+    return reply.code(502).send({
+      error: "transcription_failed",
+      message: error.message,
+    });
+  }
+
+  if (error instanceof AudioExtractionError) {
+    return reply.code(422).send({
+      error: "audio_extraction_failed",
+      message: "Could not extract audio from this upload.",
+    });
+  }
+
+  throw error;
+}
+
+function sendUploadNotFoundError(reply: FastifyReply) {
+  return reply.code(404).send({
+    error: "upload_not_found",
+    message: "Upload not found.",
+  });
+}
+
+const getTranscriptToolRequestSchema = z.object({
+  regenerate: z.boolean().optional(),
+  uploadId: z.string().min(1),
+});
+
+class UploadNotFoundError extends Error {
+  constructor(uploadId: string) {
+    super(`Upload ${uploadId} was not found.`);
+    this.name = "UploadNotFoundError";
+  }
+}
+
+function isFileNotFoundError(error: unknown) {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
 }
 
 const app = Fastify({
@@ -127,7 +239,10 @@ app.post("/uploads", async (request, reply) => {
   const uploadId = nanoid();
   const uploadDirectory = getUploadDirectory(uploadId);
   const safeFilename = sanitizeFilename(upload.filename);
-  const sourcePath = join(uploadDirectory, `source${extname(safeFilename) || ".video"}`);
+  const sourcePath = join(
+    uploadDirectory,
+    `source${extname(safeFilename) || ".video"}`,
+  );
 
   await mkdir(uploadDirectory, { recursive: true });
 
@@ -193,11 +308,12 @@ app.get("/uploads/:uploadId", async (request, reply) => {
         url: `/uploads/${metadata.id}/file`,
       },
     };
-  } catch {
-    return reply.code(404).send({
-      error: "upload_not_found",
-      message: "Upload not found.",
-    });
+  } catch (error) {
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    throw error;
   }
 });
 
@@ -209,13 +325,101 @@ app.get("/uploads/:uploadId/file", async (request, reply) => {
 
     return reply
       .type(metadata.mimeType)
-      .header("content-disposition", `inline; filename="${metadata.originalFilename}"`)
+      .header(
+        "content-disposition",
+        `inline; filename="${metadata.originalFilename}"`,
+      )
       .send(createReadStream(metadata.sourcePath));
-  } catch {
+  } catch (error) {
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    throw error;
+  }
+});
+
+app.get("/uploads/:uploadId/transcript", async (request, reply) => {
+  const { uploadId } = request.params as { uploadId: string };
+
+  try {
+    await readUploadMetadata(uploadId);
+
+    return {
+      cached: true,
+      transcript: await readUploadTranscript(uploadId),
+    };
+  } catch (error) {
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    if (!isFileNotFoundError(error)) {
+      throw error;
+    }
+
     return reply.code(404).send({
-      error: "upload_not_found",
-      message: "Upload not found.",
+      error: "transcript_not_found",
+      message: "Transcript not found.",
     });
+  }
+});
+
+app.post("/uploads/:uploadId/transcript", async (request, reply) => {
+  const { uploadId } = request.params as { uploadId: string };
+  const { regenerate } = request.query as { regenerate?: unknown };
+
+  try {
+    return await createOrReadTranscript(
+      uploadId,
+      parseRegenerateQuery(regenerate),
+    );
+  } catch (error) {
+    if (
+      error instanceof TranscriptionConfigurationError ||
+      error instanceof TranscriptionProviderError ||
+      error instanceof AudioExtractionError
+    ) {
+      return sendTranscriptionError(reply, error);
+    }
+
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    throw error;
+  }
+});
+
+app.post("/tools/get-transcript", async (request, reply) => {
+  const parsedBody = getTranscriptToolRequestSchema.safeParse(request.body);
+
+  if (!parsedBody.success) {
+    return reply.code(400).send({
+      error: "invalid_tool_arguments",
+      message: "Provide an uploadId.",
+    });
+  }
+
+  try {
+    return await createOrReadTranscript(
+      parsedBody.data.uploadId,
+      parsedBody.data.regenerate ?? false,
+    );
+  } catch (error) {
+    if (
+      error instanceof TranscriptionConfigurationError ||
+      error instanceof TranscriptionProviderError ||
+      error instanceof AudioExtractionError
+    ) {
+      return sendTranscriptionError(reply, error);
+    }
+
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    throw error;
   }
 });
 
