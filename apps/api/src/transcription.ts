@@ -79,10 +79,13 @@ export class AudioExtractionError extends Error {
   }
 }
 
-const ffmpegPath = process.env.FFMPEG_PATH ?? "ffmpeg";
-const openAITranscriptionModel =
-  process.env.OPENAI_TRANSCRIPTION_MODEL ?? "whisper-1";
-const openAITranscriptionLanguage = process.env.OPENAI_TRANSCRIPTION_LANGUAGE;
+function getFfmpegPath() {
+  return process.env.FFMPEG_PATH ?? "ffmpeg";
+}
+
+function getOpenAITranscriptionModel() {
+  return process.env.OPENAI_TRANSCRIPTION_MODEL ?? "whisper-1";
+}
 
 function assertTranscriptionConfigured() {
   if (!process.env.OPENAI_API_KEY) {
@@ -127,7 +130,7 @@ async function runCommand(command: string, args: string[]) {
 async function extractAudio(upload: UploadMetadata, uploadDirectory: string) {
   const audioPath = join(uploadDirectory, "transcript-source.mp3");
 
-  await runCommand(ffmpegPath, [
+  await runCommand(getFfmpegPath(), [
     "-y",
     "-i",
     upload.sourcePath,
@@ -171,7 +174,7 @@ function normalizeOpenAITranscript(
     id: nanoid(),
     language: response.language,
     provider: {
-      model: openAITranscriptionModel,
+      model: getOpenAITranscriptionModel(),
       name: "openai",
     },
     segments,
@@ -189,12 +192,12 @@ async function transcribeAudioWithOpenAI(audioPath: string) {
     new Blob([new Uint8Array(audio)], { type: "audio/mpeg" }),
     "audio.mp3",
   );
-  formData.append("model", openAITranscriptionModel);
+  formData.append("model", getOpenAITranscriptionModel());
   formData.append("response_format", "verbose_json");
   formData.append("timestamp_granularities[]", "segment");
 
-  if (openAITranscriptionLanguage) {
-    formData.append("language", openAITranscriptionLanguage);
+  if (process.env.OPENAI_TRANSCRIPTION_LANGUAGE) {
+    formData.append("language", process.env.OPENAI_TRANSCRIPTION_LANGUAGE);
   }
 
   const response = await fetch(

@@ -3,12 +3,18 @@ import multipart from "@fastify/multipart";
 import Fastify, { type FastifyReply } from "fastify";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { extname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
 import { z } from "zod";
+import {
+  mergeClipRenderPlan,
+  renderClipRequestSchema,
+  type ClipRenderPlan,
+} from "./clip.js";
+import { renderClipToFile } from "./rendering.js";
 import {
   AudioExtractionError,
   TranscriptionConfigurationError,
@@ -19,8 +25,30 @@ import {
 } from "./transcription.js";
 
 const apiRoot = fileURLToPath(new URL("..", import.meta.url));
-const dataRoot = process.env.MEDIA_DATA_DIR ?? join(apiRoot, ".data");
+
+try {
+  process.loadEnvFile(join(apiRoot, ".env"));
+} catch (error) {
+  if (
+    !(
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    )
+  ) {
+    throw error;
+  }
+}
+
+const dataRoot = process.env.MEDIA_DATA_DIR
+  ? isAbsolute(process.env.MEDIA_DATA_DIR)
+    ? process.env.MEDIA_DATA_DIR
+    : resolve(apiRoot, process.env.MEDIA_DATA_DIR)
+  : join(apiRoot, ".data");
 const uploadRoot = join(dataRoot, "uploads");
+const port = Number(process.env.PORT ?? 4000);
+const internalMediaBaseUrl =
+  process.env.MEDIA_INTERNAL_BASE_URL ?? `http://127.0.0.1:${port}`;
 const defaultMaxUploadBytes = 1024 * 1024 * 1024;
 const configuredMaxUploadBytes = Number(process.env.MEDIA_MAX_UPLOAD_BYTES);
 const maxUploadBytes =
@@ -70,6 +98,18 @@ function getUploadTranscriptPath(uploadId: string) {
   return join(getUploadDirectory(uploadId), "transcript.json");
 }
 
+function getUploadRenderDirectory(uploadId: string, renderId: string) {
+  return join(getUploadDirectory(uploadId), "renders", renderId);
+}
+
+function getUploadRenderClipPath(uploadId: string, renderId: string) {
+  return join(getUploadRenderDirectory(uploadId, renderId), "clip.json");
+}
+
+function getUploadRenderOutputPath(uploadId: string, renderId: string) {
+  return join(getUploadRenderDirectory(uploadId, renderId), "output.mp4");
+}
+
 async function readUploadMetadata(uploadId: string) {
   const contents = await readFile(getUploadMetadataPath(uploadId), "utf8").catch(
     (error: unknown) => {
@@ -88,6 +128,27 @@ async function readUploadTranscript(uploadId: string) {
   const contents = await readFile(getUploadTranscriptPath(uploadId), "utf8");
 
   return JSON.parse(contents) as Transcript;
+}
+
+async function readUploadTranscriptIfPresent(uploadId: string) {
+  try {
+    return await readUploadTranscript(uploadId);
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return undefined;
+    }
+
+    throw error;
+  }
+}
+
+async function readClipRenderPlan(uploadId: string, renderId: string) {
+  const contents = await readFile(
+    getUploadRenderClipPath(uploadId, renderId),
+    "utf8",
+  );
+
+  return JSON.parse(contents) as ClipRenderPlan;
 }
 
 async function createOrReadTranscript(uploadId: string, regenerate: boolean) {
@@ -166,6 +227,13 @@ const getTranscriptToolRequestSchema = z.object({
   uploadId: z.string().min(1),
 });
 
+class RenderNotFoundError extends Error {
+  constructor(renderId: string) {
+    super(`Render ${renderId} was not found.`);
+    this.name = "RenderNotFoundError";
+  }
+}
+
 class UploadNotFoundError extends Error {
   constructor(uploadId: string) {
     super(`Upload ${uploadId} was not found.`);
@@ -178,6 +246,26 @@ function isFileNotFoundError(error: unknown) {
     error instanceof Error &&
     "code" in error &&
     (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
+function renderFileUrl(uploadId: string, renderId: string) {
+  return `/uploads/${uploadId}/renders/${renderId}/file`;
+}
+
+function sourceFileUrl(uploadId: string) {
+  return `${internalMediaBaseUrl}/uploads/${uploadId}/file`;
+}
+
+async function readRenderFileStats(uploadId: string, renderId: string) {
+  return await stat(getUploadRenderOutputPath(uploadId, renderId)).catch(
+    (error: unknown) => {
+      if (isFileNotFoundError(error)) {
+        throw new RenderNotFoundError(renderId);
+      }
+
+      throw error;
+    },
   );
 }
 
@@ -423,7 +511,140 @@ app.post("/tools/get-transcript", async (request, reply) => {
   }
 });
 
-const port = Number(process.env.PORT ?? 4000);
+app.post("/uploads/:uploadId/renders", async (request, reply) => {
+  const { uploadId } = request.params as { uploadId: string };
+  const parsedBody = renderClipRequestSchema.safeParse(request.body ?? {});
+
+  if (!parsedBody.success) {
+    return reply.code(400).send({
+      error: "invalid_clip",
+      message: parsedBody.error.issues[0]?.message ?? "Invalid clip shape.",
+    });
+  }
+
+  try {
+    await readUploadMetadata(uploadId);
+
+    const transcript = await readUploadTranscriptIfPresent(uploadId);
+    const clip = mergeClipRenderPlan(
+      uploadId,
+      parsedBody.data.clip,
+      transcript,
+    );
+    const renderId = nanoid();
+    const renderDirectory = getUploadRenderDirectory(uploadId, renderId);
+    const outputPath = getUploadRenderOutputPath(uploadId, renderId);
+
+    await mkdir(renderDirectory, { recursive: true });
+    await writeFile(
+      getUploadRenderClipPath(uploadId, renderId),
+      `${JSON.stringify(clip, null, 2)}\n`,
+      "utf8",
+    );
+
+    await renderClipToFile({
+      bundleDirectory: dataRoot,
+      clip,
+      outputPath,
+      sourceUrl: sourceFileUrl(uploadId),
+    });
+
+    const outputStats = await stat(outputPath);
+
+    return reply.code(201).send({
+      render: {
+        byteLength: outputStats.size,
+        clip,
+        createdAt: new Date().toISOString(),
+        id: renderId,
+        mimeType: "video/mp4",
+        uploadId,
+        url: renderFileUrl(uploadId, renderId),
+      },
+    });
+  } catch (error) {
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    request.log.error({ error, uploadId }, "Failed to render clip");
+
+    return reply.code(500).send({
+      error: "render_failed",
+      message: "Could not render this clip.",
+    });
+  }
+});
+
+app.get("/uploads/:uploadId/renders/:renderId", async (request, reply) => {
+  const { renderId, uploadId } = request.params as {
+    renderId: string;
+    uploadId: string;
+  };
+
+  try {
+    await readUploadMetadata(uploadId);
+
+    const [clip, outputStats] = await Promise.all([
+      readClipRenderPlan(uploadId, renderId),
+      readRenderFileStats(uploadId, renderId),
+    ]);
+
+    return {
+      render: {
+        byteLength: outputStats.size,
+        clip,
+        id: renderId,
+        mimeType: "video/mp4",
+        uploadId,
+        url: renderFileUrl(uploadId, renderId),
+      },
+    };
+  } catch (error) {
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    if (error instanceof RenderNotFoundError || isFileNotFoundError(error)) {
+      return reply.code(404).send({
+        error: "render_not_found",
+        message: "Render not found.",
+      });
+    }
+
+    throw error;
+  }
+});
+
+app.get("/uploads/:uploadId/renders/:renderId/file", async (request, reply) => {
+  const { renderId, uploadId } = request.params as {
+    renderId: string;
+    uploadId: string;
+  };
+
+  try {
+    await readUploadMetadata(uploadId);
+    await readRenderFileStats(uploadId, renderId);
+
+    return reply
+      .type("video/mp4")
+      .header("content-disposition", `inline; filename="${renderId}.mp4"`)
+      .send(createReadStream(getUploadRenderOutputPath(uploadId, renderId)));
+  } catch (error) {
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    if (error instanceof RenderNotFoundError) {
+      return reply.code(404).send({
+        error: "render_not_found",
+        message: "Render not found.",
+      });
+    }
+
+    throw error;
+  }
+});
 
 await app.listen({
   host: "127.0.0.1",
