@@ -10,7 +10,16 @@ import {
 type FocusedVideo = {
   aspectRatio: number | null;
   name: string;
+  uploadId: string | null;
   url: string;
+};
+
+type UploadStatus = "idle" | "uploading" | "uploaded" | "failed";
+
+type MediaUploadResponse = {
+  upload: {
+    id: string;
+  };
 };
 
 const DEFAULT_VIDEO_ASPECT_RATIO = 9 / 16;
@@ -20,9 +29,13 @@ const LANDSCAPE_MAX_WIDTH = 360;
 const PREVIEW_TOP_OFFSET = 48;
 const PREVIEW_BOTTOM_MARGIN = 16;
 const PREVIEW_FILENAME_HEIGHT = 30;
+const PREVIEW_STATUS_HEIGHT = 30;
 const PREVIEW_ERROR_HEIGHT = 44;
 const MIN_PREVIEW_FRAME_HEIGHT = 120;
 const VIDEO_FILE_EXTENSIONS = /\.(avi|m4v|mkv|mov|mp4|ogg|ogv|webm)$/i;
+const MEDIA_API_BASE_URL =
+  process.env.NEXT_PUBLIC_MEDIA_API_BASE_URL ??
+  process.env.NEXT_PUBLIC_CLIPFORGE_API_BASE_URL ?? "http://127.0.0.1:4000";
 
 function isLikelyVideoFile(file: File) {
   return file.type.startsWith("video/") || VIDEO_FILE_EXTENSIONS.test(file.name);
@@ -43,11 +56,13 @@ function getPreviewStyle({
   aspectRatio,
   hasError,
   hasFilename,
+  hasStatus,
   viewportHeight,
 }: {
   aspectRatio: number;
   hasError: boolean;
   hasFilename: boolean;
+  hasStatus: boolean;
   viewportHeight: number | null;
 }): CSSProperties {
   const targetWidth = getTargetPreviewWidth(aspectRatio);
@@ -62,6 +77,7 @@ function getPreviewStyle({
     PREVIEW_TOP_OFFSET +
     PREVIEW_BOTTOM_MARGIN +
     (hasFilename ? PREVIEW_FILENAME_HEIGHT : 0) +
+    (hasStatus ? PREVIEW_STATUS_HEIGHT : 0) +
     (hasError ? PREVIEW_ERROR_HEIGHT : 0);
   const maxFrameHeight = Math.max(
     MIN_PREVIEW_FRAME_HEIGHT,
@@ -79,6 +95,7 @@ function getPreviewStyle({
 export function TrueForgeChat() {
   const [focusedVideo, setFocusedVideo] = useState<FocusedVideo | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<UploadStatus>("idle");
   const [viewportHeight, setViewportHeight] = useState<number | null>(null);
   const focusedVideoUrlRef = useRef<string | null>(null);
   const uploadAttemptRef = useRef(0);
@@ -89,6 +106,7 @@ export function TrueForgeChat() {
     aspectRatio: focusedVideoAspectRatio,
     hasError: Boolean(uploadError),
     hasFilename: Boolean(focusedVideo),
+    hasStatus: Boolean(focusedVideo) && uploadStatus !== "idle",
     viewportHeight,
   });
 
@@ -168,10 +186,13 @@ export function TrueForgeChat() {
       setFocusedVideo({
         aspectRatio: metadataVideo.videoWidth / metadataVideo.videoHeight,
         name: file.name,
+        uploadId: null,
         url,
       });
       setUploadError(null);
+      setUploadStatus("uploading");
       cleanupMetadataVideo();
+      void uploadVideoToMediaService(file, uploadAttempt, url);
     };
 
     metadataVideo.onerror = () => {
@@ -187,6 +208,61 @@ export function TrueForgeChat() {
     metadataVideo.src = url;
 
     event.target.value = "";
+  };
+
+  const uploadVideoToMediaService = async (
+    file: File,
+    uploadAttempt: number,
+    videoUrl: string,
+  ) => {
+    const formData = new FormData();
+    formData.append("video", file);
+
+    try {
+      const response = await fetch(`${MEDIA_API_BASE_URL}/uploads`, {
+        method: "POST",
+        body: formData,
+      });
+      const body = (await response.json().catch(() => null)) as
+        | MediaUploadResponse
+        | { message?: string }
+        | null;
+
+      if (!response.ok) {
+        throw new Error(
+          body && "message" in body && body.message
+            ? body.message
+            : "The media service rejected this upload.",
+        );
+      }
+
+      if (!body || !("upload" in body)) {
+        throw new Error("The media service returned an unexpected response.");
+      }
+
+      if (uploadAttempt !== uploadAttemptRef.current) {
+        return;
+      }
+
+      setFocusedVideo((currentVideo) =>
+        currentVideo?.url === videoUrl
+          ? { ...currentVideo, uploadId: body.upload.id }
+          : currentVideo,
+      );
+      setUploadStatus("uploaded");
+      setUploadError(null);
+    } catch (error) {
+      if (uploadAttempt !== uploadAttemptRef.current) {
+        return;
+      }
+
+      setUploadStatus("failed");
+      setUploadError(
+        error instanceof Error
+          ? error.message
+          : "The media service could not save this upload.",
+      );
+    }
   };
 
   return (
@@ -240,6 +316,15 @@ export function TrueForgeChat() {
             <div className="truncate border-t border-black/10 px-2 py-1.5 text-xs font-medium text-neutral-700">
               {focusedVideo.name}
             </div>
+            {uploadStatus !== "idle" ? (
+              <div className="border-t border-black/10 px-2 py-1.5 text-xs text-neutral-500">
+                {uploadStatus === "uploading" ? "Uploading..." : null}
+                {uploadStatus === "uploaded" && focusedVideo.uploadId
+                  ? `Saved ${focusedVideo.uploadId}`
+                  : null}
+                {uploadStatus === "failed" ? "Upload failed" : null}
+              </div>
+            ) : null}
             {uploadError ? (
               <p className="border-t border-red-200 bg-red-50 px-2 py-2 text-xs leading-snug text-red-700">
                 {uploadError}

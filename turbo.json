@@ -1,6 +1,14 @@
 {
   "$schema": "https://turborepo.dev/schema.json",
-  "globalEnv": ["TRUEFORGE_BASE_URL"],
+  "globalEnv": [
+    "CLIPFORGE_API_BASE_URL",
+    "MEDIA_ALLOWED_ORIGINS",
+    "MEDIA_API_BASE_URL",
+    "MEDIA_DATA_DIR",
+    "NEXT_PUBLIC_CLIPFORGE_API_BASE_URL",
+    "NEXT_PUBLIC_MEDIA_API_BASE_URL",
+    "TRUEFORGE_BASE_URL"
+  ],
   "ui": "tui",
   "tasks": {
     "build": {
