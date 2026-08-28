@@ -32,6 +32,15 @@ const PREVIEW_FILENAME_HEIGHT = 30;
 const PREVIEW_STATUS_HEIGHT = 30;
 const PREVIEW_ERROR_HEIGHT = 44;
 const MIN_PREVIEW_FRAME_HEIGHT = 120;
+const DEFAULT_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
+const CONFIGURED_MAX_UPLOAD_BYTES = Number(
+  process.env.NEXT_PUBLIC_MEDIA_MAX_UPLOAD_BYTES,
+);
+const MAX_UPLOAD_BYTES =
+  Number.isFinite(CONFIGURED_MAX_UPLOAD_BYTES) &&
+  CONFIGURED_MAX_UPLOAD_BYTES > 0
+    ? Math.floor(CONFIGURED_MAX_UPLOAD_BYTES)
+    : DEFAULT_MAX_UPLOAD_BYTES;
 const VIDEO_FILE_EXTENSIONS = /\.(avi|m4v|mkv|mov|mp4|ogg|ogv|webm)$/i;
 const MEDIA_API_BASE_URL =
   process.env.NEXT_PUBLIC_MEDIA_API_BASE_URL ??
@@ -144,6 +153,12 @@ export function TrueForgeChat() {
 
     if (!isLikelyVideoFile(file)) {
       setUploadError("Choose a video file such as MP4, MOV, or WebM.");
+      event.target.value = "";
+      return;
+    }
+
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setUploadError("Videos must be 1 GB or smaller.");
       event.target.value = "";
       return;
     }

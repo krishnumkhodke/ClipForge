@@ -21,7 +21,12 @@ type UploadMetadata = {
 const apiRoot = fileURLToPath(new URL("..", import.meta.url));
 const dataRoot = process.env.MEDIA_DATA_DIR ?? join(apiRoot, ".data");
 const uploadRoot = join(dataRoot, "uploads");
-const maxUploadBytes = 1024 * 1024 * 1024;
+const defaultMaxUploadBytes = 1024 * 1024 * 1024;
+const configuredMaxUploadBytes = Number(process.env.MEDIA_MAX_UPLOAD_BYTES);
+const maxUploadBytes =
+  Number.isFinite(configuredMaxUploadBytes) && configuredMaxUploadBytes > 0
+    ? Math.floor(configuredMaxUploadBytes)
+    : defaultMaxUploadBytes;
 const defaultAllowedOrigins = [
   "http://127.0.0.1:3000",
   "http://localhost:3000",
@@ -93,6 +98,7 @@ await app.register(multipart, {
     fileSize: maxUploadBytes,
     files: 1,
   },
+  throwFileSizeLimit: false,
 });
 
 app.get("/health", async () => {
@@ -127,6 +133,15 @@ app.post("/uploads", async (request, reply) => {
 
   try {
     await pipeline(upload.file, createWriteStream(sourcePath));
+
+    if (upload.file.truncated) {
+      await rm(uploadDirectory, { force: true, recursive: true });
+
+      return reply.code(413).send({
+        error: "upload_too_large",
+        message: "Videos must be 1 GB or smaller.",
+      });
+    }
 
     const fileStats = await stat(sourcePath);
     const metadata: UploadMetadata = {
