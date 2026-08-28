@@ -1,5 +1,6 @@
 {
   "$schema": "https://turborepo.dev/schema.json",
+  "globalEnv": ["TRUEFORGE_BASE_URL"],
   "ui": "tui",
   "tasks": {
     "build": {
