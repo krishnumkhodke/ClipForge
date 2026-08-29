@@ -1,6 +1,6 @@
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
-import Fastify, { type FastifyReply } from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { extname, isAbsolute, join, resolve } from "node:path";
@@ -51,6 +51,7 @@ const dataRoot = process.env.MEDIA_DATA_DIR
     : resolve(apiRoot, process.env.MEDIA_DATA_DIR)
   : join(apiRoot, ".data");
 const uploadRoot = join(dataRoot, "uploads");
+const sessionRoot = join(dataRoot, "sessions");
 const port = Number(process.env.PORT ?? 4000);
 const internalMediaBaseUrl =
   process.env.MEDIA_INTERNAL_BASE_URL ?? `http://127.0.0.1:${port}`;
@@ -102,6 +103,14 @@ function getUploadMetadataPath(uploadId: string) {
   return join(getUploadDirectory(uploadId), "metadata.json");
 }
 
+function getSessionDirectory(sessionId: string) {
+  return join(sessionRoot, assertStorageId(sessionId, "sessionId"));
+}
+
+function getSessionUploadsIndexPath(sessionId: string) {
+  return join(getSessionDirectory(sessionId), "uploads.json");
+}
+
 function getUploadTranscriptPath(uploadId: string) {
   return join(getUploadDirectory(uploadId), "transcript.json");
 }
@@ -135,6 +144,69 @@ async function readUploadMetadata(uploadId: string) {
   });
 
   return JSON.parse(contents) as UploadMetadata;
+}
+
+async function readSessionUploadIndex(
+  sessionId: string,
+): Promise<SessionUploadIndex> {
+  const safeSessionId = assertStorageId(sessionId, "sessionId");
+
+  try {
+    const contents = await readFile(
+      getSessionUploadsIndexPath(safeSessionId),
+      "utf8",
+    );
+
+    return JSON.parse(contents) as SessionUploadIndex;
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return {
+        focusedUploadId: null,
+        sessionId: safeSessionId,
+        uploads: [],
+      };
+    }
+
+    throw error;
+  }
+}
+
+async function writeSessionUploadIndex(index: SessionUploadIndex) {
+  await mkdir(getSessionDirectory(index.sessionId), { recursive: true });
+  await writeFile(
+    getSessionUploadsIndexPath(index.sessionId),
+    `${JSON.stringify(index, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+async function addUploadToSession(
+  sessionId: string,
+  uploadId: string,
+  createdAt: string,
+) {
+  const index = await readSessionUploadIndex(sessionId);
+  const uploads = index.uploads.some((upload) => upload.uploadId === uploadId)
+    ? index.uploads
+    : [...index.uploads, { createdAt, uploadId }];
+
+  await writeSessionUploadIndex({
+    ...index,
+    focusedUploadId: uploadId,
+    uploads,
+  });
+}
+
+function toUploadResponse(metadata: UploadMetadata) {
+  return {
+    byteLength: metadata.byteLength,
+    createdAt: metadata.createdAt,
+    id: metadata.id,
+    mimeType: metadata.mimeType,
+    originalFilename: metadata.originalFilename,
+    trueforgeSessionId: metadata.trueforgeSessionId,
+    url: `/uploads/${metadata.id}/file`,
+  };
 }
 
 async function readUploadTranscript(uploadId: string) {
@@ -250,6 +322,15 @@ const getTranscriptToolRequestSchema = z.object({
   regenerate: z.boolean().optional(),
   uploadId: storageIdSchema,
 });
+
+type SessionUploadIndex = {
+  focusedUploadId: string | null;
+  sessionId: string;
+  uploads: Array<{
+    createdAt: string;
+    uploadId: string;
+  }>;
+};
 
 class RenderNotFoundError extends Error {
   constructor(renderId: string) {
@@ -421,7 +502,11 @@ app.all("/mcp", async (request, reply) => {
   }
 });
 
-app.post("/uploads", async (request, reply) => {
+async function storeUpload(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  trueforgeSessionId?: string,
+) {
   const upload = await request.file();
 
   if (!upload) {
@@ -470,6 +555,7 @@ app.post("/uploads", async (request, reply) => {
       mimeType: upload.mimetype,
       originalFilename: safeFilename,
       sourcePath,
+      ...(trueforgeSessionId ? { trueforgeSessionId } : {}),
     };
 
     await writeFile(
@@ -478,19 +564,63 @@ app.post("/uploads", async (request, reply) => {
       "utf8",
     );
 
+    if (trueforgeSessionId) {
+      await addUploadToSession(trueforgeSessionId, uploadId, metadata.createdAt);
+    }
+
     return reply.code(201).send({
-      upload: {
-        byteLength: metadata.byteLength,
-        createdAt: metadata.createdAt,
-        id: metadata.id,
-        mimeType: metadata.mimeType,
-        originalFilename: metadata.originalFilename,
-        url: `/uploads/${metadata.id}/file`,
-      },
+      upload: toUploadResponse(metadata),
     });
   } catch (error) {
     await rm(uploadDirectory, { force: true, recursive: true });
     request.log.error({ error, uploadId }, "Failed to store upload");
+
+    throw error;
+  }
+}
+
+app.post("/uploads", async (request, reply) => {
+  return await storeUpload(request, reply);
+});
+
+app.post("/sessions/:sessionId/uploads", async (request, reply) => {
+  const { sessionId } = request.params as { sessionId: string };
+
+  try {
+    return await storeUpload(
+      request,
+      reply,
+      assertStorageId(sessionId, "sessionId"),
+    );
+  } catch (error) {
+    if (error instanceof InvalidStorageIdError) {
+      return sendInvalidStorageIdError(reply, error);
+    }
+
+    throw error;
+  }
+});
+
+app.get("/sessions/:sessionId/uploads", async (request, reply) => {
+  const { sessionId } = request.params as { sessionId: string };
+
+  try {
+    const index = await readSessionUploadIndex(sessionId);
+    const uploads = await Promise.all(
+      index.uploads.map(async ({ uploadId }) =>
+        toUploadResponse(await readUploadMetadata(uploadId)),
+      ),
+    );
+
+    return {
+      focusedUploadId: index.focusedUploadId,
+      sessionId: index.sessionId,
+      uploads,
+    };
+  } catch (error) {
+    if (error instanceof InvalidStorageIdError) {
+      return sendInvalidStorageIdError(reply, error);
+    }
 
     throw error;
   }
@@ -503,14 +633,7 @@ app.get("/uploads/:uploadId", async (request, reply) => {
     const metadata = await readUploadMetadata(uploadId);
 
     return {
-      upload: {
-        byteLength: metadata.byteLength,
-        createdAt: metadata.createdAt,
-        id: metadata.id,
-        mimeType: metadata.mimeType,
-        originalFilename: metadata.originalFilename,
-        url: `/uploads/${metadata.id}/file`,
-      },
+      upload: toUploadResponse(metadata),
     };
   } catch (error) {
     if (error instanceof InvalidStorageIdError) {
