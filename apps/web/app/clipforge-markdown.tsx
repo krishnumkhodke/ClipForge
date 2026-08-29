@@ -8,9 +8,9 @@ const MEDIA_API_BASE_URL =
   "http://127.0.0.1:4000";
 
 const CLIPFORGE_RENDER_URL_PATTERN =
-  /(?:https?:\/\/[^\s<>)]+)?\/uploads\/[a-zA-Z0-9_-]+\/renders\/[a-zA-Z0-9_-]+\/file/g;
+  /(?:https?:\/\/[^\s<>)]+|sandbox:)?\/uploads\/[a-zA-Z0-9_-]+\/renders\/[a-zA-Z0-9_-]+\/file/g;
 const CLIPFORGE_MARKDOWN_LINK_PATTERN =
-  /\[[^\]]+\]\(((?:https?:\/\/[^\s<>)]+)?\/uploads\/[a-zA-Z0-9_-]+\/renders\/[a-zA-Z0-9_-]+\/file)\)/g;
+  /\[[^\]]+\]\(((?:https?:\/\/[^\s<>)]+|sandbox:)?\/uploads\/[a-zA-Z0-9_-]+\/renders\/[a-zA-Z0-9_-]+\/file)\)/g;
 
 type MarkdownSegment =
   | {
@@ -27,7 +27,9 @@ function resolveMediaUrl(url: string) {
     return url;
   }
 
-  return `${MEDIA_API_BASE_URL.replace(/\/+$/, "")}/${url.replace(/^\/+/, "")}`;
+  const mediaPath = url.replace(/^sandbox:/, "");
+
+  return `${MEDIA_API_BASE_URL.replace(/\/+$/, "")}/${mediaPath.replace(/^\/+/, "")}`;
 }
 
 function splitClipForgeRenderUrls(content: string): MarkdownSegment[] {

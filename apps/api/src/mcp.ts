@@ -27,17 +27,21 @@ type UploadReferenceInput = {
 };
 
 type ClipForgeMcpHandlers = {
-  getTranscript(input: {
-    regenerate: boolean;
-  } & UploadReferenceInput): Promise<
+  getTranscript(
+    input: {
+      regenerate: boolean;
+    } & UploadReferenceInput,
+  ): Promise<
     TranscriptResult & {
       sessionId?: string | undefined;
       uploadId: string;
     }
   >;
-  renderClip(input: {
-    clip: z.infer<typeof renderClipRequestSchema>["clip"];
-  } & UploadReferenceInput): Promise<
+  renderClip(
+    input: {
+      clip: z.infer<typeof renderClipRequestSchema>["clip"];
+    } & UploadReferenceInput,
+  ): Promise<
     RenderResult & {
       sessionId?: string | undefined;
     }
@@ -104,6 +108,22 @@ function jsonToolResult(
   };
 }
 
+function compactRenderResult(render: RenderResult) {
+  const { clip, ...renderMetadata } = render;
+
+  return {
+    ...renderMetadata,
+    clip: {
+      endSeconds: clip.endSeconds,
+      id: clip.id,
+      output: clip.output,
+      startSeconds: clip.startSeconds,
+      title: clip.title,
+      uploadId: clip.uploadId,
+    },
+  };
+}
+
 export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
   const server = new McpServer({
     name: "clipforge-media",
@@ -158,10 +178,11 @@ export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
     },
     async ({ clip, sessionId, uploadId }) => {
       const render = await handlers.renderClip({ clip, sessionId, uploadId });
+      const compactRender = compactRenderResult(render);
 
       return jsonToolResult("Rendered clip.", {
-        render,
-        ...uploadReferenceSummary(render),
+        render: compactRender,
+        ...uploadReferenceSummary(compactRender),
       });
     },
   );

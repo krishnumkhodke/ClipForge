@@ -2,6 +2,7 @@
 
 import type {
   AgentUIServer,
+  TurnStreamData,
   TurnInputItem,
   UserMessageContent,
 } from "@truefoundry/trueforge-ui";
@@ -112,9 +113,9 @@ async function sessionHasFocusedVideo(sessionId: string, signal?: AbortSignal) {
       return false;
     }
 
-    const body = (await response.json().catch(() => null)) as
-      | SessionUploadsResponse
-      | null;
+    const body = (await response
+      .json()
+      .catch(() => null)) as SessionUploadsResponse | null;
 
     if (!body?.focusedUploadId) {
       return false;
@@ -155,10 +156,7 @@ async function addClipForgeContextToTurnRequest<
 
     return {
       ...item,
-      content: appendClipForgeContextToContent(
-        item.content,
-        request.sessionId,
-      ),
+      content: appendClipForgeContextToContent(item.content, request.sessionId),
     };
   });
 
@@ -166,6 +164,16 @@ async function addClipForgeContextToTurnRequest<
     ...request,
     ...(input ? { input } : {}),
   };
+}
+
+function getCreatedTurnId(item: TurnStreamData) {
+  const { event } = item;
+
+  if (event.type !== "turn.created") {
+    return undefined;
+  }
+
+  return event.turnId;
 }
 
 export function createClipForgeServer(): AgentUIServer {
@@ -177,9 +185,34 @@ export function createClipForgeServer(): AgentUIServer {
     ...trueForgeServer,
     async *createTurn(request) {
       const augmentedRequest = await addClipForgeContextToTurnRequest(request);
+      let lastSequenceNumber: number | undefined;
+      let turnId: string | undefined;
+      let sawTurnDone = false;
 
-      for await (const item of trueForgeServer.createTurn(augmentedRequest)) {
-        yield redactClipForgeContext(item);
+      try {
+        for await (const item of trueForgeServer.createTurn(augmentedRequest)) {
+          lastSequenceNumber = item.sequenceNumber;
+          turnId ??= getCreatedTurnId(item);
+          sawTurnDone = sawTurnDone || item.event.type === "turn.done";
+          yield redactClipForgeContext(item);
+        }
+      } catch (error) {
+        if (sawTurnDone || request.abortSignal?.aborted) {
+          return;
+        }
+
+        if (!turnId || !trueForgeServer.subscribeToTurn) {
+          throw error;
+        }
+
+        for await (const item of trueForgeServer.subscribeToTurn({
+          abortSignal: request.abortSignal,
+          afterSequenceNumber: lastSequenceNumber,
+          sessionId: request.sessionId,
+          turnId,
+        })) {
+          yield redactClipForgeContext(item);
+        }
       }
     },
     async getTurn(request) {

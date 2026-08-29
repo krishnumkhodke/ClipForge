@@ -80,6 +80,46 @@ function captionsForClip(
     }));
 }
 
+function normalizeClipCaptions(
+  captions: ClipCaption[],
+  startSeconds: number,
+  endSeconds: number,
+) {
+  if (captions.length === 0) {
+    return captions;
+  }
+
+  const clipStartMs = Math.round(startSeconds * 1000);
+  const clipEndMs = Math.round(endSeconds * 1000);
+  const clipDurationMs = clipEndMs - clipStartMs;
+  const maxCaptionEndMs = Math.max(...captions.map((caption) => caption.endMs));
+  const alreadyRelative = maxCaptionEndMs <= clipDurationMs;
+  const overlapsAbsoluteClipRange = captions.some(
+    (caption) => caption.endMs > clipStartMs && caption.startMs < clipEndMs,
+  );
+
+  if (alreadyRelative || !overlapsAbsoluteClipRange) {
+    return captions;
+  }
+
+  return captions
+    .filter(
+      (caption) => caption.endMs > clipStartMs && caption.startMs < clipEndMs,
+    )
+    .map((caption) => ({
+      ...caption,
+      endMs: Math.min(caption.endMs, clipEndMs) - clipStartMs,
+      startMs: Math.max(caption.startMs, clipStartMs) - clipStartMs,
+      timestampMs:
+        caption.timestampMs === null
+          ? null
+          : Math.min(
+              Math.max(caption.timestampMs ?? caption.startMs, clipStartMs),
+              clipEndMs,
+            ) - clipStartMs,
+    }));
+}
+
 export function buildDummyClipRenderPlan(
   uploadId: string,
   transcript?: Transcript,
@@ -114,8 +154,9 @@ export function mergeClipRenderPlan(
   return clipRenderPlanSchema.parse({
     ...fallback,
     ...clip,
-    captions:
-      clip?.captions ?? captionsForClip(transcript, startSeconds, endSeconds),
+    captions: clip?.captions
+      ? normalizeClipCaptions(clip.captions, startSeconds, endSeconds)
+      : captionsForClip(transcript, startSeconds, endSeconds),
     endSeconds,
     output: {
       ...fallback.output,
