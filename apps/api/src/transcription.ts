@@ -11,6 +11,7 @@ export type UploadMetadata = {
   mimeType: string;
   originalFilename: string;
   sourcePath: string;
+  trueforgeSessionId?: string;
 };
 
 export type TranscriptSegment = {

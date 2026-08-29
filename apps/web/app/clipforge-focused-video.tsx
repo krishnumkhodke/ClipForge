@@ -13,9 +13,12 @@ import {
   type CSSProperties,
   type ChangeEvent,
   type ReactNode,
+  type SyntheticEvent,
 } from "react";
 import {
   ThreadRootShell,
+  useOptionalServer,
+  useOptionalShellMode,
   useAuiState,
   type ThreadRootShellProps,
 } from "@truefoundry/trueforge-ui";
@@ -35,14 +38,29 @@ type ThreadUploadState = {
   uploadStatus: UploadStatus;
 };
 
+type MediaUpload = {
+  id: string;
+  originalFilename: string;
+  url: string;
+};
+
 type MediaUploadResponse = {
-  upload: {
-    id: string;
-  };
+  upload: MediaUpload;
+};
+
+type SessionUploadsResponse = {
+  focusedUploadId: string | null;
+  sessionId: string;
+  uploads: MediaUpload[];
 };
 
 type FocusedVideoContextValue = {
+  beginThreadUploadAttempt: (threadKey: string) => number;
   getThreadUploadState: (threadKey: string) => ThreadUploadState;
+  isCurrentThreadUploadAttempt: (
+    threadKey: string,
+    uploadAttempt: number,
+  ) => boolean;
   migrateThreadUploadState: (fromThreadKey: string, toThreadKey: string) => void;
   updateThreadUploadState: (
     threadKey: string,
@@ -80,6 +98,7 @@ const MEDIA_API_BASE_URL =
   process.env.NEXT_PUBLIC_MEDIA_API_BASE_URL ??
   process.env.NEXT_PUBLIC_CLIPFORGE_API_BASE_URL ??
   "http://127.0.0.1:4000";
+const DEFAULT_AGENT_SPEC = { model: { name: "openai-main/gpt-4.1" } };
 
 const FocusedVideoContext = createContext<FocusedVideoContextValue | null>(
   null,
@@ -148,6 +167,18 @@ function revokeObjectUrl(url: string) {
   }
 }
 
+function resolveMediaUrl(pathOrUrl: string) {
+  try {
+    return new URL(pathOrUrl).toString();
+  } catch {
+    // Relative media paths are served by the configured media service base URL.
+  }
+
+  const mediaBaseUrl = MEDIA_API_BASE_URL.replace(/\/+$/, "");
+
+  return `${mediaBaseUrl}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`;
+}
+
 function useFocusedVideoContext() {
   const context = useContext(FocusedVideoContext);
 
@@ -169,6 +200,7 @@ export function ClipForgeFocusedVideoProvider({
     Record<string, ThreadUploadState>
   >({});
   const uploadsByThreadKeyRef = useRef(uploadsByThreadKey);
+  const uploadAttemptsRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
     uploadsByThreadKeyRef.current = uploadsByThreadKey;
@@ -206,10 +238,31 @@ export function ClipForgeFocusedVideoProvider({
     [],
   );
 
+  const beginThreadUploadAttempt = useCallback((threadKey: string) => {
+    const uploadAttempt = (uploadAttemptsRef.current[threadKey] ?? 0) + 1;
+    uploadAttemptsRef.current[threadKey] = uploadAttempt;
+
+    return uploadAttempt;
+  }, []);
+
+  const isCurrentThreadUploadAttempt = useCallback(
+    (threadKey: string, uploadAttempt: number) =>
+      uploadAttemptsRef.current[threadKey] === uploadAttempt,
+    [],
+  );
+
   const migrateThreadUploadState = useCallback(
     (fromThreadKey: string, toThreadKey: string) => {
       if (fromThreadKey === toThreadKey) {
         return;
+      }
+
+      // Upload promises continue running while TrueForge replaces the temporary
+      // local thread with the newly-created remote session. Move the attempt
+      // marker synchronously so those promises can follow the same upload.
+      const fromAttempt = uploadAttemptsRef.current[fromThreadKey];
+      if (fromAttempt !== undefined) {
+        uploadAttemptsRef.current[toThreadKey] = fromAttempt;
       }
 
       setUploadsByThreadKey((currentUploads) => {
@@ -234,11 +287,19 @@ export function ClipForgeFocusedVideoProvider({
 
   const value = useMemo<FocusedVideoContextValue>(
     () => ({
+      beginThreadUploadAttempt,
       getThreadUploadState,
+      isCurrentThreadUploadAttempt,
       migrateThreadUploadState,
       updateThreadUploadState,
     }),
-    [getThreadUploadState, migrateThreadUploadState, updateThreadUploadState],
+    [
+      beginThreadUploadAttempt,
+      getThreadUploadState,
+      isCurrentThreadUploadAttempt,
+      migrateThreadUploadState,
+      updateThreadUploadState,
+    ],
   );
 
   return (
@@ -249,17 +310,31 @@ export function ClipForgeFocusedVideoProvider({
 }
 
 function ClipForgeFocusedVideoPanel({
+  localThreadId,
+  remoteSessionId,
   threadKey,
   threadUpload,
 }: {
+  localThreadId: string;
+  remoteSessionId: string | undefined;
   threadKey: string;
   threadUpload: ThreadUploadState;
 }) {
-  const { updateThreadUploadState } = useFocusedVideoContext();
+  const {
+    beginThreadUploadAttempt,
+    isCurrentThreadUploadAttempt,
+    migrateThreadUploadState,
+    updateThreadUploadState,
+  } = useFocusedVideoContext();
+  const server = useOptionalServer();
+  const shell = useOptionalShellMode();
   const [viewportHeight, setViewportHeight] = useState<number | null>(null);
-  const uploadAttemptsRef = useRef<Record<string, number>>({});
+  const createSessionPromiseRef = useRef<Promise<string> | null>(null);
+  const hydratedSessionIdsRef = useRef<Set<string>>(new Set());
   const videoInputId = useId();
   const focusedVideo = threadUpload.focusedVideo;
+  const focusedVideoUrl = focusedVideo?.url;
+  const hasFocusedVideo = Boolean(focusedVideo);
   const focusedVideoAspectRatio =
     focusedVideo?.aspectRatio ?? DEFAULT_VIDEO_ASPECT_RATIO;
   const previewStyle = getPreviewStyle({
@@ -288,22 +363,183 @@ function ClipForgeFocusedVideoPanel({
     [threadKey, updateThreadUploadState],
   );
 
-  const isCurrentUploadAttempt = useCallback(
-    (uploadThreadKey: string, uploadAttempt: number) =>
-      uploadAttemptsRef.current[uploadThreadKey] === uploadAttempt,
-    [],
-  );
+  useEffect(() => {
+    if (
+      !remoteSessionId ||
+      hasFocusedVideo ||
+      threadUpload.uploadStatus === "uploading" ||
+      hydratedSessionIdsRef.current.has(remoteSessionId)
+    ) {
+      return;
+    }
+
+    hydratedSessionIdsRef.current.add(remoteSessionId);
+    const abortController = new AbortController();
+
+    void (async () => {
+      const response = await fetch(
+        `${MEDIA_API_BASE_URL}/sessions/${encodeURIComponent(remoteSessionId)}/uploads`,
+        { signal: abortController.signal },
+      );
+      const body = (await response.json().catch(() => null)) as
+        | SessionUploadsResponse
+        | { message?: string }
+        | null;
+
+      if (!response.ok) {
+        throw new Error(
+          body && "message" in body && body.message
+            ? body.message
+            : "Could not load this session's video.",
+        );
+      }
+
+      if (!body || !("uploads" in body)) {
+        throw new Error("The media service returned an unexpected response.");
+      }
+
+      const focusedUpload = body.uploads.find(
+        (upload) => upload.id === body.focusedUploadId,
+      );
+
+      if (!focusedUpload) {
+        return;
+      }
+
+      updateThreadUploadState(remoteSessionId, (currentUpload) => {
+        if (
+          currentUpload.focusedVideo ||
+          currentUpload.uploadStatus === "uploading"
+        ) {
+          return currentUpload;
+        }
+
+        return {
+          focusedVideo: {
+            aspectRatio: null,
+            name: focusedUpload.originalFilename,
+            uploadId: focusedUpload.id,
+            url: resolveMediaUrl(focusedUpload.url),
+          },
+          uploadError: null,
+          uploadStatus: "uploaded",
+        };
+      });
+    })().catch((error: unknown) => {
+      if (abortController.signal.aborted) {
+        return;
+      }
+
+      hydratedSessionIdsRef.current.delete(remoteSessionId);
+      updateThreadUploadState(remoteSessionId, (currentUpload) => {
+        if (
+          currentUpload.focusedVideo ||
+          currentUpload.uploadStatus === "uploading"
+        ) {
+          return currentUpload;
+        }
+
+        return {
+          ...currentUpload,
+          uploadError:
+            error instanceof Error
+              ? error.message
+              : "Could not load this session's video.",
+          uploadStatus: "idle",
+        };
+      });
+    });
+
+    return () => {
+      abortController.abort();
+    };
+  }, [
+    hasFocusedVideo,
+    remoteSessionId,
+    threadUpload.uploadStatus,
+    updateThreadUploadState,
+  ]);
+
+  const ensureTrueForgeSession = useCallback(async () => {
+    if (remoteSessionId) {
+      return remoteSessionId;
+    }
+
+    if (createSessionPromiseRef.current) {
+      return await createSessionPromiseRef.current;
+    }
+
+    if (!server) {
+      throw new Error("The TrueForge server is not ready yet.");
+    }
+
+    if (!shell || shell.mode.status !== "active") {
+      throw new Error("Open a chat before uploading a video.");
+    }
+
+    const activeMode = shell.mode;
+
+    createSessionPromiseRef.current = (async () => {
+      const createdSession = activeMode.isMutable
+        ? await server.createSession({
+            agentSpec: activeMode.agentSpec ?? DEFAULT_AGENT_SPEC,
+          })
+        : await server.createSession(
+            activeMode.agentName ?? activeMode.agentId
+              ? { agentName: activeMode.agentName ?? activeMode.agentId }
+              : { agentSpec: DEFAULT_AGENT_SPEC },
+          );
+
+      migrateThreadUploadState(localThreadId, createdSession.id);
+      shell.openHistorySession({
+        ...(createdSession.agentName
+          ? { agentName: createdSession.agentName }
+          : {}),
+        isMutable: createdSession.isMutable,
+        sessionId: createdSession.id,
+      });
+
+      return createdSession.id;
+    })();
+
+    try {
+      return await createSessionPromiseRef.current;
+    } finally {
+      createSessionPromiseRef.current = null;
+    }
+  }, [
+    localThreadId,
+    migrateThreadUploadState,
+    remoteSessionId,
+    server,
+    shell,
+  ]);
 
   const uploadVideoToMediaService = useCallback(
-    async (file: File, uploadThreadKey: string, uploadAttempt: number) => {
+    async (
+      file: File,
+      uploadThreadKey: string,
+      uploadAttempt: number,
+    ) => {
       const formData = new FormData();
       formData.append("video", file);
+      let uploadStateKey = uploadThreadKey;
 
       try {
-        const response = await fetch(`${MEDIA_API_BASE_URL}/uploads`, {
-          method: "POST",
-          body: formData,
-        });
+        const sessionId = await ensureTrueForgeSession();
+        uploadStateKey = sessionId;
+
+        if (!isCurrentThreadUploadAttempt(sessionId, uploadAttempt)) {
+          return;
+        }
+
+        const response = await fetch(
+          `${MEDIA_API_BASE_URL}/sessions/${encodeURIComponent(sessionId)}/uploads`,
+          {
+            method: "POST",
+            body: formData,
+          },
+        );
         const body = (await response.json().catch(() => null)) as
           | MediaUploadResponse
           | { message?: string }
@@ -321,11 +557,11 @@ function ClipForgeFocusedVideoPanel({
           throw new Error("The media service returned an unexpected response.");
         }
 
-        if (!isCurrentUploadAttempt(uploadThreadKey, uploadAttempt)) {
+        if (!isCurrentThreadUploadAttempt(sessionId, uploadAttempt)) {
           return;
         }
 
-        updateThreadUploadState(uploadThreadKey, (currentUpload) => ({
+        updateThreadUploadState(sessionId, (currentUpload) => ({
           ...currentUpload,
           focusedVideo: currentUpload.focusedVideo
             ? { ...currentUpload.focusedVideo, uploadId: body.upload.id }
@@ -334,11 +570,11 @@ function ClipForgeFocusedVideoPanel({
           uploadStatus: "uploaded",
         }));
       } catch (error) {
-        if (!isCurrentUploadAttempt(uploadThreadKey, uploadAttempt)) {
+        if (!isCurrentThreadUploadAttempt(uploadStateKey, uploadAttempt)) {
           return;
         }
 
-        updateThreadUploadState(uploadThreadKey, (currentUpload) => ({
+        updateThreadUploadState(uploadStateKey, (currentUpload) => ({
           ...currentUpload,
           uploadError:
             error instanceof Error
@@ -348,7 +584,11 @@ function ClipForgeFocusedVideoPanel({
         }));
       }
     },
-    [isCurrentUploadAttempt, updateThreadUploadState],
+    [
+      ensureTrueForgeSession,
+      isCurrentThreadUploadAttempt,
+      updateThreadUploadState,
+    ],
   );
 
   const handleVideoChange = useCallback(
@@ -360,9 +600,7 @@ function ClipForgeFocusedVideoPanel({
       }
 
       const uploadThreadKey = threadKey;
-      const uploadAttempt =
-        (uploadAttemptsRef.current[uploadThreadKey] ?? 0) + 1;
-      uploadAttemptsRef.current[uploadThreadKey] = uploadAttempt;
+      const uploadAttempt = beginThreadUploadAttempt(uploadThreadKey);
 
       if (!isLikelyVideoFile(file)) {
         updateCurrentThreadUpload((currentUpload) => ({
@@ -396,7 +634,7 @@ function ClipForgeFocusedVideoPanel({
       };
 
       metadataVideo.onloadedmetadata = () => {
-        if (!isCurrentUploadAttempt(uploadThreadKey, uploadAttempt)) {
+        if (!isCurrentThreadUploadAttempt(uploadThreadKey, uploadAttempt)) {
           revokeObjectUrl(url);
           cleanupMetadataVideo();
           return;
@@ -437,7 +675,7 @@ function ClipForgeFocusedVideoPanel({
       };
 
       metadataVideo.onerror = () => {
-        if (isCurrentUploadAttempt(uploadThreadKey, uploadAttempt)) {
+        if (isCurrentThreadUploadAttempt(uploadThreadKey, uploadAttempt)) {
           updateThreadUploadState(uploadThreadKey, (currentUpload) => ({
             ...currentUpload,
             uploadError:
@@ -453,13 +691,55 @@ function ClipForgeFocusedVideoPanel({
       event.target.value = "";
     },
     [
-      isCurrentUploadAttempt,
+      beginThreadUploadAttempt,
+      isCurrentThreadUploadAttempt,
       threadKey,
       threadUpload.focusedVideo,
       updateCurrentThreadUpload,
       updateThreadUploadState,
       uploadVideoToMediaService,
     ],
+  );
+
+  const handleFocusedVideoLoadedMetadata = useCallback(
+    (event: SyntheticEvent<HTMLVideoElement>) => {
+      const video = event.currentTarget;
+
+      if (
+        !focusedVideoUrl ||
+        video.videoWidth <= 0 ||
+        video.videoHeight <= 0
+      ) {
+        return;
+      }
+
+      const aspectRatio = video.videoWidth / video.videoHeight;
+
+      updateCurrentThreadUpload((currentUpload) => {
+        if (
+          !currentUpload.focusedVideo ||
+          currentUpload.focusedVideo.url !== focusedVideoUrl
+        ) {
+          return currentUpload;
+        }
+
+        if (
+          currentUpload.focusedVideo.aspectRatio !== null &&
+          Math.abs(currentUpload.focusedVideo.aspectRatio - aspectRatio) < 0.001
+        ) {
+          return currentUpload;
+        }
+
+        return {
+          ...currentUpload,
+          focusedVideo: {
+            ...currentUpload.focusedVideo,
+            aspectRatio,
+          },
+        };
+      });
+    },
+    [focusedVideoUrl, updateCurrentThreadUpload],
   );
 
   return (
@@ -488,6 +768,7 @@ function ClipForgeFocusedVideoPanel({
               controls
               playsInline
               preload="metadata"
+              onLoadedMetadata={handleFocusedVideoLoadedMetadata}
               onError={() =>
                 updateCurrentThreadUpload((currentUpload) => ({
                   ...currentUpload,
@@ -580,6 +861,8 @@ export const ClipForgeThreadRootShell = forwardRef<
     >
       {children}
       <ClipForgeFocusedVideoPanel
+        localThreadId={localThreadId}
+        remoteSessionId={remoteSessionId}
         threadKey={threadKey}
         threadUpload={threadUpload}
       />
