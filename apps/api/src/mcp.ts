@@ -21,37 +21,77 @@ type RenderResult = {
   url: string;
 };
 
+type UploadReferenceInput = {
+  sessionId?: string | undefined;
+  uploadId?: string | undefined;
+};
+
 type ClipForgeMcpHandlers = {
-  getTranscript(input: {
-    regenerate: boolean;
-    uploadId: string;
-  }): Promise<TranscriptResult>;
-  renderClip(input: {
-    clip: z.infer<typeof renderClipRequestSchema>["clip"];
-    uploadId: string;
-  }): Promise<RenderResult>;
+  getTranscript(
+    input: {
+      regenerate: boolean;
+    } & UploadReferenceInput,
+  ): Promise<
+    TranscriptResult & {
+      sessionId?: string | undefined;
+      uploadId: string;
+    }
+  >;
+  renderClip(
+    input: {
+      clip: z.infer<typeof renderClipRequestSchema>["clip"];
+    } & UploadReferenceInput,
+  ): Promise<
+    RenderResult & {
+      sessionId?: string | undefined;
+    }
+  >;
+};
+
+const uploadReferenceInputSchema = {
+  sessionId: z
+    .string()
+    .pipe(storageIdSchema)
+    .optional()
+    .describe(
+      "The TrueForge session id. Prefer this so ClipForge can use the session's focused video.",
+    ),
+  uploadId: z
+    .string()
+    .pipe(storageIdSchema)
+    .optional()
+    .describe(
+      "Optional ClipForge upload id for debugging. Prefer sessionId in normal chat use.",
+    ),
 };
 
 const getTranscriptInputSchema = {
+  ...uploadReferenceInputSchema,
   regenerate: z
     .boolean()
     .optional()
     .describe("Regenerate the transcript instead of returning a cached one."),
-  uploadId: z
-    .string()
-    .pipe(storageIdSchema)
-    .describe("The ClipForge upload id returned by the media service."),
 };
 
 const renderClipInputSchema = {
+  ...uploadReferenceInputSchema,
   clip: renderClipRequestSchema.shape.clip.describe(
     "Optional clip render plan. Omit to render a short smoke-test clip.",
   ),
-  uploadId: z
-    .string()
-    .pipe(storageIdSchema)
-    .describe("The ClipForge upload id returned by the media service."),
 };
+
+function uploadReferenceSummary({
+  sessionId,
+  uploadId,
+}: {
+  sessionId?: string | undefined;
+  uploadId: string;
+}) {
+  return {
+    ...(sessionId ? { sessionId } : {}),
+    uploadId,
+  };
+}
 
 function jsonToolResult(
   summary: string,
@@ -65,6 +105,22 @@ function jsonToolResult(
       },
     ],
     structuredContent,
+  };
+}
+
+function compactRenderResult(render: RenderResult) {
+  const { clip, ...renderMetadata } = render;
+
+  return {
+    ...renderMetadata,
+    clip: {
+      endSeconds: clip.endSeconds,
+      id: clip.id,
+      output: clip.output,
+      startSeconds: clip.startSeconds,
+      title: clip.title,
+      uploadId: clip.uploadId,
+    },
   };
 }
 
@@ -88,15 +144,19 @@ export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
       inputSchema: getTranscriptInputSchema,
       title: "Get Transcript",
     },
-    async ({ regenerate = false, uploadId }) => {
-      const result = await handlers.getTranscript({ regenerate, uploadId });
+    async ({ regenerate = false, sessionId, uploadId }) => {
+      const result = await handlers.getTranscript({
+        regenerate,
+        sessionId,
+        uploadId,
+      });
 
       return jsonToolResult(
         result.cached ? "Returned cached transcript." : "Generated transcript.",
         {
           cached: result.cached,
           transcript: result.transcript,
-          uploadId,
+          ...uploadReferenceSummary(result),
         },
       );
     },
@@ -116,11 +176,13 @@ export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
       inputSchema: renderClipInputSchema,
       title: "Render Clip",
     },
-    async ({ clip, uploadId }) => {
-      const render = await handlers.renderClip({ clip, uploadId });
+    async ({ clip, sessionId, uploadId }) => {
+      const render = await handlers.renderClip({ clip, sessionId, uploadId });
+      const compactRender = compactRenderResult(render);
 
       return jsonToolResult("Rendered clip.", {
-        render,
+        render: compactRender,
+        ...uploadReferenceSummary(compactRender),
       });
     },
   );

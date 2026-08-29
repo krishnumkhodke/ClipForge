@@ -320,7 +320,12 @@ function sendInvalidStorageIdError(
 
 const getTranscriptToolRequestSchema = z.object({
   regenerate: z.boolean().optional(),
-  uploadId: storageIdSchema,
+  sessionId: storageIdSchema.optional(),
+  uploadId: storageIdSchema.optional(),
+});
+const renderClipToolRequestSchema = renderClipRequestSchema.extend({
+  sessionId: storageIdSchema.optional(),
+  uploadId: storageIdSchema.optional(),
 });
 
 type SessionUploadIndex = {
@@ -343,6 +348,20 @@ class UploadNotFoundError extends Error {
   constructor(uploadId: string) {
     super(`Upload ${uploadId} was not found.`);
     this.name = "UploadNotFoundError";
+  }
+}
+
+class MissingUploadReferenceError extends Error {
+  constructor() {
+    super("Provide a sessionId or uploadId.");
+    this.name = "MissingUploadReferenceError";
+  }
+}
+
+class FocusedUploadNotFoundError extends Error {
+  constructor(sessionId: string) {
+    super(`Session ${sessionId} does not have a focused video.`);
+    this.name = "FocusedUploadNotFoundError";
   }
 }
 
@@ -419,6 +438,70 @@ async function createUploadRender(
   };
 }
 
+async function resolveUploadId(input: {
+  sessionId?: string | undefined;
+  uploadId?: string | undefined;
+}) {
+  if (input.uploadId) {
+    return assertStorageId(input.uploadId, "uploadId");
+  }
+
+  if (!input.sessionId) {
+    throw new MissingUploadReferenceError();
+  }
+
+  const index = await readSessionUploadIndex(input.sessionId);
+
+  if (!index.focusedUploadId) {
+    throw new FocusedUploadNotFoundError(index.sessionId);
+  }
+
+  try {
+    await readUploadMetadata(index.focusedUploadId);
+  } catch (error) {
+    if (error instanceof UploadNotFoundError) {
+      throw new FocusedUploadNotFoundError(index.sessionId);
+    }
+
+    throw error;
+  }
+
+  return index.focusedUploadId;
+}
+
+function sendMissingUploadReferenceError(reply: FastifyReply) {
+  return reply.code(400).send({
+    error: "missing_upload_reference",
+    message: "Provide a sessionId or uploadId.",
+  });
+}
+
+function sendFocusedUploadNotFoundError(reply: FastifyReply) {
+  return reply.code(404).send({
+    error: "focused_upload_not_found",
+    message: "This session does not have a focused video.",
+  });
+}
+
+function sendSessionUploadResolutionError(
+  reply: FastifyReply,
+  error: unknown,
+) {
+  if (error instanceof InvalidStorageIdError) {
+    return sendInvalidStorageIdError(reply, error);
+  }
+
+  if (error instanceof MissingUploadReferenceError) {
+    return sendMissingUploadReferenceError(reply);
+  }
+
+  if (error instanceof FocusedUploadNotFoundError) {
+    return sendFocusedUploadNotFoundError(reply);
+  }
+
+  return undefined;
+}
+
 const app = Fastify({
   logger: true,
 });
@@ -464,10 +547,23 @@ app.get("/health", async () => {
 });
 
 const clipForgeMcpHandlers = {
-  getTranscript: async ({ regenerate, uploadId }) =>
-    await createOrReadTranscript(uploadId, regenerate),
-  renderClip: async ({ clip, uploadId }) =>
-    await createUploadRender(uploadId, clip),
+  getTranscript: async ({ regenerate, sessionId, uploadId }) => {
+    const resolvedUploadId = await resolveUploadId({ sessionId, uploadId });
+
+    return {
+      ...(await createOrReadTranscript(resolvedUploadId, regenerate)),
+      ...(sessionId ? { sessionId } : {}),
+      uploadId: resolvedUploadId,
+    };
+  },
+  renderClip: async ({ clip, sessionId, uploadId }) => {
+    const resolvedUploadId = await resolveUploadId({ sessionId, uploadId });
+
+    return {
+      ...(await createUploadRender(resolvedUploadId, clip)),
+      ...(sessionId ? { sessionId } : {}),
+    };
+  },
 } satisfies Parameters<typeof createClipForgeMcpConnection>[0];
 
 app.all("/mcp", async (request, reply) => {
@@ -739,28 +835,134 @@ app.post("/uploads/:uploadId/transcript", async (request, reply) => {
   }
 });
 
-app.post("/tools/get-transcript", async (request, reply) => {
-  const parsedBody = getTranscriptToolRequestSchema.safeParse(request.body);
-
-  if (!parsedBody.success) {
-    return reply.code(400).send({
-      error: "invalid_tool_arguments",
-      message: "Provide an uploadId.",
-    });
-  }
+app.get("/sessions/:sessionId/transcript", async (request, reply) => {
+  const { sessionId } = request.params as { sessionId: string };
 
   try {
-    return await createOrReadTranscript(
-      parsedBody.data.uploadId,
-      parsedBody.data.regenerate ?? false,
-    );
+    const uploadId = await resolveUploadId({ sessionId });
+    await readUploadMetadata(uploadId);
+
+    return {
+      cached: true,
+      transcript: await readUploadTranscript(uploadId),
+      uploadId,
+    };
   } catch (error) {
+    const resolutionResponse = sendSessionUploadResolutionError(reply, error);
+    if (resolutionResponse) {
+      return resolutionResponse;
+    }
+
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    if (!isFileNotFoundError(error)) {
+      throw error;
+    }
+
+    return reply.code(404).send({
+      error: "transcript_not_found",
+      message: "Transcript not found.",
+    });
+  }
+});
+
+app.post("/sessions/:sessionId/transcript", async (request, reply) => {
+  const { sessionId } = request.params as { sessionId: string };
+  const { regenerate } = request.query as { regenerate?: unknown };
+
+  try {
+    const uploadId = await resolveUploadId({ sessionId });
+
+    return {
+      ...(await createOrReadTranscript(
+        uploadId,
+        parseRegenerateQuery(regenerate),
+      )),
+      uploadId,
+    };
+  } catch (error) {
+    const resolutionResponse = sendSessionUploadResolutionError(reply, error);
+    if (resolutionResponse) {
+      return resolutionResponse;
+    }
+
     if (
       error instanceof TranscriptionConfigurationError ||
       error instanceof TranscriptionProviderError ||
       error instanceof AudioExtractionError
     ) {
       return sendTranscriptionError(reply, error);
+    }
+
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    throw error;
+  }
+});
+
+app.post("/tools/get-transcript", async (request, reply) => {
+  const parsedBody = getTranscriptToolRequestSchema.safeParse(request.body);
+
+  if (!parsedBody.success) {
+    return reply.code(400).send({
+      error: "invalid_tool_arguments",
+      message: "Provide a sessionId or uploadId.",
+    });
+  }
+
+  try {
+    const uploadId = await resolveUploadId(parsedBody.data);
+
+    return await createOrReadTranscript(
+      uploadId,
+      parsedBody.data.regenerate ?? false,
+    );
+  } catch (error) {
+    const resolutionResponse = sendSessionUploadResolutionError(reply, error);
+    if (resolutionResponse) {
+      return resolutionResponse;
+    }
+
+    if (
+      error instanceof TranscriptionConfigurationError ||
+      error instanceof TranscriptionProviderError ||
+      error instanceof AudioExtractionError
+    ) {
+      return sendTranscriptionError(reply, error);
+    }
+
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    throw error;
+  }
+});
+
+app.post("/tools/render-clip", async (request, reply) => {
+  const parsedBody = renderClipToolRequestSchema.safeParse(request.body ?? {});
+
+  if (!parsedBody.success) {
+    return reply.code(400).send({
+      error: "invalid_clip",
+      message: parsedBody.error.issues[0]?.message ?? "Invalid clip request.",
+    });
+  }
+
+  try {
+    const uploadId = await resolveUploadId(parsedBody.data);
+
+    return {
+      render: await createUploadRender(uploadId, parsedBody.data.clip),
+    };
+  } catch (error) {
+    const resolutionResponse = sendSessionUploadResolutionError(reply, error);
+    if (resolutionResponse) {
+      return resolutionResponse;
     }
 
     if (error instanceof UploadNotFoundError) {
@@ -801,6 +1003,37 @@ app.post("/uploads/:uploadId/renders", async (request, reply) => {
       error: "render_failed",
       message: "Could not render this clip.",
     });
+  }
+});
+
+app.post("/sessions/:sessionId/renders", async (request, reply) => {
+  const { sessionId } = request.params as { sessionId: string };
+  const parsedBody = renderClipRequestSchema.safeParse(request.body ?? {});
+
+  if (!parsedBody.success) {
+    return reply.code(400).send({
+      error: "invalid_clip",
+      message: parsedBody.error.issues[0]?.message ?? "Invalid clip request.",
+    });
+  }
+
+  try {
+    const uploadId = await resolveUploadId({ sessionId });
+
+    return {
+      render: await createUploadRender(uploadId, parsedBody.data.clip),
+    };
+  } catch (error) {
+    const resolutionResponse = sendSessionUploadResolutionError(reply, error);
+    if (resolutionResponse) {
+      return resolutionResponse;
+    }
+
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    throw error;
   }
 });
 

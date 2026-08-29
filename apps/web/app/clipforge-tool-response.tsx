@@ -57,7 +57,9 @@ function resolveMediaUrl(url: string) {
     return url;
   }
 
-  return `${MEDIA_API_BASE_URL.replace(/\/+$/, "")}/${url.replace(/^\/+/, "")}`;
+  const mediaPath = url.replace(/^sandbox:/, "");
+
+  return `${MEDIA_API_BASE_URL.replace(/\/+$/, "")}/${mediaPath.replace(/^\/+/, "")}`;
 }
 
 function getClipForgeRenderResult(
