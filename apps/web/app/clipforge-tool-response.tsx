@@ -128,20 +128,44 @@ function RenderVideoPreview({
   );
 }
 
-export function ClipForgeToolCallContentBlock(
-  props: ToolCallContentBlockProps,
-) {
+export function ClipForgeToolCallContentBlock({
+  className,
+  content,
+  contentHeightRem,
+  contentRef,
+  copyValue: providedCopyValue,
+  dataTestPrefix,
+  fullscreen,
+  onFullscreenChange,
+  resizable,
+  title,
+  ...props
+}: ToolCallContentBlockProps) {
+  const [copied, setCopied] = useState(false);
   const renderResult =
-    props.title === "Response" ? getClipForgeRenderResult(props.content) : null;
+    title === "Response" ? getClipForgeRenderResult(content) : null;
 
   if (!renderResult) {
-    return <ToolCallContentBlock {...props} />;
+    return (
+      <ToolCallContentBlock
+        className={className}
+        content={content}
+        contentHeightRem={contentHeightRem}
+        contentRef={contentRef}
+        copyValue={providedCopyValue}
+        dataTestPrefix={dataTestPrefix}
+        fullscreen={fullscreen}
+        onFullscreenChange={onFullscreenChange}
+        resizable={resizable}
+        title={title}
+        {...props}
+      />
+    );
   }
 
   const { render } = renderResult;
   const size = formatBytes(render.byteLength);
-  const copyValue = props.copyValue ?? props.content;
-  const [copied, setCopied] = useState(false);
+  const copyValue = providedCopyValue ?? content;
 
   const handleCopy = () => {
     void navigator.clipboard.writeText(copyValue).then(() => {
@@ -152,11 +176,11 @@ export function ClipForgeToolCallContentBlock(
 
   return (
     <div
-      className={props.className}
-      data-content={props.content}
+      className={className}
+      data-content={content}
       data-testid={
-        props.dataTestPrefix
-          ? `${props.dataTestPrefix}-clipforge-preview`
+        dataTestPrefix
+          ? `${dataTestPrefix}-clipforge-preview`
           : "clipforge-render-preview"
       }
     >
@@ -168,7 +192,7 @@ export function ClipForgeToolCallContentBlock(
             </p>
             <p className="mt-0.5 truncate text-xs text-text-secondary">
               {render.clip?.title ?? render.id ?? "ClipForge render"}
-              {size ? ` · ${size}` : ""}
+              {size ? ` - ${size}` : ""}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1 text-text-secondary">
@@ -180,10 +204,10 @@ export function ClipForgeToolCallContentBlock(
             >
               <Icon name={copied ? "check" : "clone"} size={14} />
             </button>
-            {props.onFullscreenChange ? (
+            {onFullscreenChange ? (
               <button
                 type="button"
-                onClick={() => props.onFullscreenChange?.(true)}
+                onClick={() => onFullscreenChange(true)}
                 className="inline-flex size-6 cursor-pointer items-center justify-center rounded transition-colors hover:text-text-primary"
                 aria-label="Expand preview"
               >
@@ -193,14 +217,14 @@ export function ClipForgeToolCallContentBlock(
           </div>
         </div>
         <div
-          ref={props.contentRef}
+          ref={contentRef}
           className="overflow-auto bg-neutral-950"
           style={
-            props.resizable
+            resizable
               ? {
                   height:
-                    props.contentHeightRem !== undefined
-                      ? `${Math.min(props.contentHeightRem, 28)}rem`
+                    contentHeightRem !== undefined
+                      ? `${Math.min(contentHeightRem, 28)}rem`
                       : undefined,
                   resize: "vertical",
                 }
@@ -223,12 +247,12 @@ export function ClipForgeToolCallContentBlock(
               Response JSON
             </summary>
             <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded border border-border bg-background px-2 py-1 text-[11px] leading-4">
-              {props.content}
+              {content}
             </pre>
           </details>
         </div>
       </div>
-      {props.fullscreen ? (
+      {fullscreen ? (
         <div
           className="fixed inset-0 z-[100] flex flex-col bg-black/90 p-4"
           role="dialog"
@@ -240,12 +264,12 @@ export function ClipForgeToolCallContentBlock(
               <p className="text-sm font-semibold">Render Preview</p>
               <p className="truncate text-xs text-white/70">
                 {render.clip?.title ?? render.id ?? "ClipForge render"}
-                {size ? ` · ${size}` : ""}
+                {size ? ` - ${size}` : ""}
               </p>
             </div>
             <button
               type="button"
-              onClick={() => props.onFullscreenChange?.(false)}
+              onClick={() => onFullscreenChange?.(false)}
               className="inline-flex size-8 cursor-pointer items-center justify-center rounded text-white/70 transition-colors hover:bg-white/10 hover:text-white"
               aria-label="Close preview"
             >
