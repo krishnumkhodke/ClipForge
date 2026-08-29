@@ -27,7 +27,9 @@ type SessionUploadsResponse = {
 };
 
 function stripClipForgeContextFromText(text: string) {
-  return text.replace(CLIPFORGE_CONTEXT_PATTERN, "").trimEnd();
+  const stripped = text.replace(CLIPFORGE_CONTEXT_PATTERN, "");
+
+  return stripped === text ? text : stripped.trimEnd();
 }
 
 function redactClipForgeContext<T>(value: T): T {
