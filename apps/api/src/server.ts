@@ -18,6 +18,11 @@ import {
 import { createClipForgeMcpConnection } from "./mcp.js";
 import { renderClipToFile } from "./rendering.js";
 import {
+  assertStorageId,
+  InvalidStorageIdError,
+  storageIdSchema,
+} from "./storage-id.js";
+import {
   AudioExtractionError,
   TranscriptionConfigurationError,
   TranscriptionProviderError,
@@ -90,7 +95,7 @@ function sanitizeFilename(filename: string) {
 }
 
 function getUploadDirectory(uploadId: string) {
-  return join(uploadRoot, uploadId);
+  return join(uploadRoot, assertStorageId(uploadId, "uploadId"));
 }
 
 function getUploadMetadataPath(uploadId: string) {
@@ -102,7 +107,11 @@ function getUploadTranscriptPath(uploadId: string) {
 }
 
 function getUploadRenderDirectory(uploadId: string, renderId: string) {
-  return join(getUploadDirectory(uploadId), "renders", renderId);
+  return join(
+    getUploadDirectory(uploadId),
+    "renders",
+    assertStorageId(renderId, "renderId"),
+  );
 }
 
 function getUploadRenderClipPath(uploadId: string, renderId: string) {
@@ -226,9 +235,20 @@ function sendUploadNotFoundError(reply: FastifyReply) {
   });
 }
 
+function sendInvalidStorageIdError(
+  reply: FastifyReply,
+  error: InvalidStorageIdError,
+) {
+  return reply.code(400).send({
+    error: "invalid_storage_id",
+    field: error.field,
+    message: error.message,
+  });
+}
+
 const getTranscriptToolRequestSchema = z.object({
   regenerate: z.boolean().optional(),
-  uploadId: z.string().min(1),
+  uploadId: storageIdSchema,
 });
 
 class RenderNotFoundError extends Error {
@@ -254,7 +274,7 @@ function isFileNotFoundError(error: unknown) {
 }
 
 function renderFileUrl(uploadId: string, renderId: string) {
-  return `/uploads/${uploadId}/renders/${renderId}/file`;
+  return `/uploads/${assertStorageId(uploadId, "uploadId")}/renders/${assertStorageId(renderId, "renderId")}/file`;
 }
 
 function absoluteMediaUrl(path: string) {
@@ -262,7 +282,7 @@ function absoluteMediaUrl(path: string) {
 }
 
 function sourceFileUrl(uploadId: string) {
-  return `${internalMediaBaseUrl}/uploads/${uploadId}/file`;
+  return `${internalMediaBaseUrl}/uploads/${assertStorageId(uploadId, "uploadId")}/file`;
 }
 
 async function readRenderFileStats(uploadId: string, renderId: string) {
@@ -320,6 +340,14 @@ async function createUploadRender(
 
 const app = Fastify({
   logger: true,
+});
+
+app.setErrorHandler((error, _request, reply) => {
+  if (error instanceof InvalidStorageIdError) {
+    return sendInvalidStorageIdError(reply, error);
+  }
+
+  return reply.send(error);
 });
 
 const closeGracefully = async (signal: NodeJS.Signals) => {
@@ -485,6 +513,10 @@ app.get("/uploads/:uploadId", async (request, reply) => {
       },
     };
   } catch (error) {
+    if (error instanceof InvalidStorageIdError) {
+      return sendInvalidStorageIdError(reply, error);
+    }
+
     if (error instanceof UploadNotFoundError) {
       return sendUploadNotFoundError(reply);
     }
@@ -615,6 +647,10 @@ app.post("/uploads/:uploadId/renders", async (request, reply) => {
       render: await createUploadRender(uploadId, parsedBody.data.clip),
     });
   } catch (error) {
+    if (error instanceof InvalidStorageIdError) {
+      return sendInvalidStorageIdError(reply, error);
+    }
+
     if (error instanceof UploadNotFoundError) {
       return sendUploadNotFoundError(reply);
     }

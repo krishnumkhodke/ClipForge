@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { renderClipRequestSchema, type ClipRenderPlan } from "./clip.js";
+import { storageIdSchema } from "./storage-id.js";
 import type { Transcript } from "./transcription.js";
 
 type TranscriptResult = {
@@ -38,7 +39,7 @@ const getTranscriptInputSchema = {
     .describe("Regenerate the transcript instead of returning a cached one."),
   uploadId: z
     .string()
-    .min(1)
+    .pipe(storageIdSchema)
     .describe("The ClipForge upload id returned by the media service."),
 };
 
@@ -48,7 +49,7 @@ const renderClipInputSchema = {
   ),
   uploadId: z
     .string()
-    .min(1)
+    .pipe(storageIdSchema)
     .describe("The ClipForge upload id returned by the media service."),
 };
 
