@@ -4,8 +4,11 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ChangeEvent } from "react";
 import {
   TrueForgeUI,
+  type SlotOverrides,
   type TrueForgeServerConfig,
 } from "@truefoundry/trueforge-ui";
+import { ClipForgeMarkdown } from "./clipforge-markdown";
+import { ClipForgeToolCallContentBlock } from "./clipforge-tool-response";
 
 type FocusedVideo = {
   aspectRatio: number | null;
@@ -44,10 +47,13 @@ const MAX_UPLOAD_BYTES =
 const VIDEO_FILE_EXTENSIONS = /\.(avi|m4v|mkv|mov|mp4|ogg|ogv|webm)$/i;
 const MEDIA_API_BASE_URL =
   process.env.NEXT_PUBLIC_MEDIA_API_BASE_URL ??
-  process.env.NEXT_PUBLIC_CLIPFORGE_API_BASE_URL ?? "http://127.0.0.1:4000";
+  process.env.NEXT_PUBLIC_CLIPFORGE_API_BASE_URL ??
+  "http://127.0.0.1:4000";
 
 function isLikelyVideoFile(file: File) {
-  return file.type.startsWith("video/") || VIDEO_FILE_EXTENSIONS.test(file.name);
+  return (
+    file.type.startsWith("video/") || VIDEO_FILE_EXTENSIONS.test(file.name)
+  );
 }
 
 function getTargetPreviewWidth(aspectRatio: number | null) {
@@ -126,6 +132,13 @@ export function TrueForgeChat() {
     }),
     [],
   );
+  const overrides = useMemo<SlotOverrides>(
+    () => ({
+      Markdown: ClipForgeMarkdown,
+      ToolCallContentBlock: ClipForgeToolCallContentBlock,
+    }),
+    [],
+  );
 
   useEffect(() => {
     const updateViewportHeight = () => setViewportHeight(window.innerHeight);
@@ -188,7 +201,9 @@ export function TrueForgeChat() {
 
       if (!hasDimensions) {
         URL.revokeObjectURL(url);
-        setUploadError("This video has no readable dimensions. Choose another file.");
+        setUploadError(
+          "This video has no readable dimensions. Choose another file.",
+        );
         cleanupMetadataVideo();
         return;
       }
@@ -239,9 +254,7 @@ export function TrueForgeChat() {
         body: formData,
       });
       const body = (await response.json().catch(() => null)) as
-        | MediaUploadResponse
-        | { message?: string }
-        | null;
+        MediaUploadResponse | { message?: string } | null;
 
       if (!response.ok) {
         throw new Error(
@@ -285,6 +298,7 @@ export function TrueForgeChat() {
       <TrueForgeUI
         server={server}
         layout="sidebar"
+        overrides={overrides}
         theme={{
           brand: { name: "ClipForge" },
         }}
