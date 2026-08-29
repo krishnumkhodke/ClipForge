@@ -13,6 +13,7 @@ import {
   type CSSProperties,
   type ChangeEvent,
   type ReactNode,
+  type SyntheticEvent,
 } from "react";
 import {
   ThreadRootShell,
@@ -37,10 +38,20 @@ type ThreadUploadState = {
   uploadStatus: UploadStatus;
 };
 
+type MediaUpload = {
+  id: string;
+  originalFilename: string;
+  url: string;
+};
+
 type MediaUploadResponse = {
-  upload: {
-    id: string;
-  };
+  upload: MediaUpload;
+};
+
+type SessionUploadsResponse = {
+  focusedUploadId: string | null;
+  sessionId: string;
+  uploads: MediaUpload[];
 };
 
 type FocusedVideoContextValue = {
@@ -154,6 +165,18 @@ function revokeObjectUrl(url: string) {
   if (url.startsWith("blob:")) {
     URL.revokeObjectURL(url);
   }
+}
+
+function resolveMediaUrl(pathOrUrl: string) {
+  try {
+    return new URL(pathOrUrl).toString();
+  } catch {
+    // Relative media paths are served by the configured media service base URL.
+  }
+
+  const mediaBaseUrl = MEDIA_API_BASE_URL.replace(/\/+$/, "");
+
+  return `${mediaBaseUrl}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`;
 }
 
 function useFocusedVideoContext() {
@@ -307,8 +330,11 @@ function ClipForgeFocusedVideoPanel({
   const shell = useOptionalShellMode();
   const [viewportHeight, setViewportHeight] = useState<number | null>(null);
   const createSessionPromiseRef = useRef<Promise<string> | null>(null);
+  const hydratedSessionIdsRef = useRef<Set<string>>(new Set());
   const videoInputId = useId();
   const focusedVideo = threadUpload.focusedVideo;
+  const focusedVideoUrl = focusedVideo?.url;
+  const hasFocusedVideo = Boolean(focusedVideo);
   const focusedVideoAspectRatio =
     focusedVideo?.aspectRatio ?? DEFAULT_VIDEO_ASPECT_RATIO;
   const previewStyle = getPreviewStyle({
@@ -336,6 +362,103 @@ function ClipForgeFocusedVideoPanel({
     },
     [threadKey, updateThreadUploadState],
   );
+
+  useEffect(() => {
+    if (
+      !remoteSessionId ||
+      hasFocusedVideo ||
+      threadUpload.uploadStatus === "uploading" ||
+      hydratedSessionIdsRef.current.has(remoteSessionId)
+    ) {
+      return;
+    }
+
+    hydratedSessionIdsRef.current.add(remoteSessionId);
+    const abortController = new AbortController();
+
+    void (async () => {
+      const response = await fetch(
+        `${MEDIA_API_BASE_URL}/sessions/${encodeURIComponent(remoteSessionId)}/uploads`,
+        { signal: abortController.signal },
+      );
+      const body = (await response.json().catch(() => null)) as
+        | SessionUploadsResponse
+        | { message?: string }
+        | null;
+
+      if (!response.ok) {
+        throw new Error(
+          body && "message" in body && body.message
+            ? body.message
+            : "Could not load this session's video.",
+        );
+      }
+
+      if (!body || !("uploads" in body)) {
+        throw new Error("The media service returned an unexpected response.");
+      }
+
+      const focusedUpload = body.uploads.find(
+        (upload) => upload.id === body.focusedUploadId,
+      );
+
+      if (!focusedUpload) {
+        return;
+      }
+
+      updateThreadUploadState(remoteSessionId, (currentUpload) => {
+        if (
+          currentUpload.focusedVideo ||
+          currentUpload.uploadStatus === "uploading"
+        ) {
+          return currentUpload;
+        }
+
+        return {
+          focusedVideo: {
+            aspectRatio: null,
+            name: focusedUpload.originalFilename,
+            uploadId: focusedUpload.id,
+            url: resolveMediaUrl(focusedUpload.url),
+          },
+          uploadError: null,
+          uploadStatus: "uploaded",
+        };
+      });
+    })().catch((error: unknown) => {
+      if (abortController.signal.aborted) {
+        return;
+      }
+
+      hydratedSessionIdsRef.current.delete(remoteSessionId);
+      updateThreadUploadState(remoteSessionId, (currentUpload) => {
+        if (
+          currentUpload.focusedVideo ||
+          currentUpload.uploadStatus === "uploading"
+        ) {
+          return currentUpload;
+        }
+
+        return {
+          ...currentUpload,
+          uploadError:
+            error instanceof Error
+              ? error.message
+              : "Could not load this session's video.",
+          uploadStatus: "idle",
+        };
+      });
+    });
+
+    return () => {
+      abortController.abort();
+    };
+  }, [
+    hasFocusedVideo,
+    remoteSessionId,
+    threadUpload.uploadStatus,
+    updateThreadUploadState,
+  ]);
 
   const ensureTrueForgeSession = useCallback(async () => {
     if (remoteSessionId) {
@@ -578,6 +701,47 @@ function ClipForgeFocusedVideoPanel({
     ],
   );
 
+  const handleFocusedVideoLoadedMetadata = useCallback(
+    (event: SyntheticEvent<HTMLVideoElement>) => {
+      const video = event.currentTarget;
+
+      if (
+        !focusedVideoUrl ||
+        video.videoWidth <= 0 ||
+        video.videoHeight <= 0
+      ) {
+        return;
+      }
+
+      const aspectRatio = video.videoWidth / video.videoHeight;
+
+      updateCurrentThreadUpload((currentUpload) => {
+        if (
+          !currentUpload.focusedVideo ||
+          currentUpload.focusedVideo.url !== focusedVideoUrl
+        ) {
+          return currentUpload;
+        }
+
+        if (
+          currentUpload.focusedVideo.aspectRatio !== null &&
+          Math.abs(currentUpload.focusedVideo.aspectRatio - aspectRatio) < 0.001
+        ) {
+          return currentUpload;
+        }
+
+        return {
+          ...currentUpload,
+          focusedVideo: {
+            ...currentUpload.focusedVideo,
+            aspectRatio,
+          },
+        };
+      });
+    },
+    [focusedVideoUrl, updateCurrentThreadUpload],
+  );
+
   return (
     <section
       aria-label="Focused video"
@@ -604,6 +768,7 @@ function ClipForgeFocusedVideoPanel({
               controls
               playsInline
               preload="metadata"
+              onLoadedMetadata={handleFocusedVideoLoadedMetadata}
               onError={() =>
                 updateCurrentThreadUpload((currentUpload) => ({
                   ...currentUpload,

@@ -606,14 +606,31 @@ app.get("/sessions/:sessionId/uploads", async (request, reply) => {
 
   try {
     const index = await readSessionUploadIndex(sessionId);
-    const uploads = await Promise.all(
-      index.uploads.map(async ({ uploadId }) =>
-        toUploadResponse(await readUploadMetadata(uploadId)),
-      ),
-    );
+    const uploads = [];
+
+    for (const { uploadId } of index.uploads) {
+      try {
+        uploads.push(toUploadResponse(await readUploadMetadata(uploadId)));
+      } catch (error) {
+        if (error instanceof UploadNotFoundError) {
+          request.log.warn(
+            { sessionId: index.sessionId, uploadId },
+            "Skipping missing session upload",
+          );
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    const availableUploadIds = new Set(uploads.map((upload) => upload.id));
 
     return {
-      focusedUploadId: index.focusedUploadId,
+      focusedUploadId:
+        index.focusedUploadId && availableUploadIds.has(index.focusedUploadId)
+          ? index.focusedUploadId
+          : null,
       sessionId: index.sessionId,
       uploads,
     };
