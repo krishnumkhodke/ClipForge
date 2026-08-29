@@ -234,6 +234,14 @@ export function ClipForgeFocusedVideoProvider({
         return;
       }
 
+      // Upload promises continue running while TrueForge replaces the temporary
+      // local thread with the newly-created remote session. Move the attempt
+      // marker synchronously so those promises can follow the same upload.
+      const fromAttempt = uploadAttemptsRef.current[fromThreadKey];
+      if (fromAttempt !== undefined) {
+        uploadAttemptsRef.current[toThreadKey] = fromAttempt;
+      }
+
       setUploadsByThreadKey((currentUploads) => {
         const fromUpload = currentUploads[fromThreadKey];
 
@@ -246,11 +254,6 @@ export function ClipForgeFocusedVideoProvider({
 
         if (!currentUploads[toThreadKey]) {
           nextUploads[toThreadKey] = fromUpload;
-        }
-
-        const fromAttempt = uploadAttemptsRef.current[fromThreadKey];
-        if (fromAttempt !== undefined) {
-          uploadAttemptsRef.current[toThreadKey] = fromAttempt;
         }
 
         return nextUploads;
@@ -397,9 +400,11 @@ function ClipForgeFocusedVideoPanel({
     ) => {
       const formData = new FormData();
       formData.append("video", file);
+      let uploadStateKey = uploadThreadKey;
 
       try {
         const sessionId = await ensureTrueForgeSession();
+        uploadStateKey = sessionId;
 
         if (!isCurrentThreadUploadAttempt(sessionId, uploadAttempt)) {
           return;
@@ -442,11 +447,11 @@ function ClipForgeFocusedVideoPanel({
           uploadStatus: "uploaded",
         }));
       } catch (error) {
-        if (!isCurrentThreadUploadAttempt(uploadThreadKey, uploadAttempt)) {
+        if (!isCurrentThreadUploadAttempt(uploadStateKey, uploadAttempt)) {
           return;
         }
 
-        updateThreadUploadState(uploadThreadKey, (currentUpload) => ({
+        updateThreadUploadState(uploadStateKey, (currentUpload) => ({
           ...currentUpload,
           uploadError:
             error instanceof Error
@@ -456,7 +461,11 @@ function ClipForgeFocusedVideoPanel({
         }));
       }
     },
-    [ensureTrueForgeSession, isCurrentThreadUploadAttempt, updateThreadUploadState],
+    [
+      ensureTrueForgeSession,
+      isCurrentThreadUploadAttempt,
+      updateThreadUploadState,
+    ],
   );
 
   const handleVideoChange = useCallback(
