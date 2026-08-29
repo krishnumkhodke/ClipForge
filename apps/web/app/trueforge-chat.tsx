@@ -4,8 +4,8 @@ import { useMemo } from "react";
 import {
   TrueForgeUI,
   type SlotOverrides,
-  type TrueForgeServerConfig,
 } from "@truefoundry/trueforge-ui";
+import { createClipForgeServer } from "./clipforge-server";
 import {
   ClipForgeFocusedVideoProvider,
   ClipForgeThreadRootShell,
@@ -14,13 +14,7 @@ import { ClipForgeMarkdown } from "./clipforge-markdown";
 import { ClipForgeToolCallContentBlock } from "./clipforge-tool-response";
 
 export function TrueForgeChat() {
-  const server = useMemo<TrueForgeServerConfig>(
-    () => ({
-      type: "trueforge",
-      baseUrl: "/trueforge",
-    }),
-    [],
-  );
+  const server = useMemo(() => createClipForgeServer(), []);
   const overrides = useMemo<SlotOverrides>(
     () => ({
       Markdown: ClipForgeMarkdown,
