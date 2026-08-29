@@ -43,7 +43,17 @@ async function getBundledServeUrl(bundleDirectory: string) {
       entryPoint,
       outDir: join(bundleDirectory, "remotion-bundle"),
       publicDir: null,
-      webpackOverride: (config) => config,
+      webpackOverride: (config) => ({
+        ...config,
+        resolve: {
+          ...config.resolve,
+          extensionAlias: {
+            ...config.resolve?.extensionAlias,
+            ".js": [".js", ".ts", ".tsx"],
+            ".jsx": [".jsx", ".tsx"],
+          },
+        },
+      }),
     }),
   );
 

@@ -12,9 +12,16 @@ import { z } from "zod";
 import {
   mergeClipRenderPlan,
   renderClipRequestSchema,
+  type ClipRenderPlanInput,
   type ClipRenderPlan,
 } from "./clip.js";
+import { createClipForgeMcpConnection } from "./mcp.js";
 import { renderClipToFile } from "./rendering.js";
+import {
+  assertStorageId,
+  InvalidStorageIdError,
+  storageIdSchema,
+} from "./storage-id.js";
 import {
   AudioExtractionError,
   TranscriptionConfigurationError,
@@ -29,13 +36,11 @@ const apiRoot = fileURLToPath(new URL("..", import.meta.url));
 try {
   process.loadEnvFile(join(apiRoot, ".env"));
 } catch (error) {
-  if (
-    !(
-      error instanceof Error &&
-      "code" in error &&
-      (error as NodeJS.ErrnoException).code === "ENOENT"
-    )
-  ) {
+  if (!(
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  )) {
     throw error;
   }
 }
@@ -49,6 +54,9 @@ const uploadRoot = join(dataRoot, "uploads");
 const port = Number(process.env.PORT ?? 4000);
 const internalMediaBaseUrl =
   process.env.MEDIA_INTERNAL_BASE_URL ?? `http://127.0.0.1:${port}`;
+const publicMediaBaseUrl = (
+  process.env.MEDIA_PUBLIC_BASE_URL ?? internalMediaBaseUrl
+).replace(/\/+$/, "");
 const defaultMaxUploadBytes = 1024 * 1024 * 1024;
 const configuredMaxUploadBytes = Number(process.env.MEDIA_MAX_UPLOAD_BYTES);
 const maxUploadBytes =
@@ -87,7 +95,7 @@ function sanitizeFilename(filename: string) {
 }
 
 function getUploadDirectory(uploadId: string) {
-  return join(uploadRoot, uploadId);
+  return join(uploadRoot, assertStorageId(uploadId, "uploadId"));
 }
 
 function getUploadMetadataPath(uploadId: string) {
@@ -99,7 +107,11 @@ function getUploadTranscriptPath(uploadId: string) {
 }
 
 function getUploadRenderDirectory(uploadId: string, renderId: string) {
-  return join(getUploadDirectory(uploadId), "renders", renderId);
+  return join(
+    getUploadDirectory(uploadId),
+    "renders",
+    assertStorageId(renderId, "renderId"),
+  );
 }
 
 function getUploadRenderClipPath(uploadId: string, renderId: string) {
@@ -111,15 +123,16 @@ function getUploadRenderOutputPath(uploadId: string, renderId: string) {
 }
 
 async function readUploadMetadata(uploadId: string) {
-  const contents = await readFile(getUploadMetadataPath(uploadId), "utf8").catch(
-    (error: unknown) => {
-      if (isFileNotFoundError(error)) {
-        throw new UploadNotFoundError(uploadId);
-      }
+  const contents = await readFile(
+    getUploadMetadataPath(uploadId),
+    "utf8",
+  ).catch((error: unknown) => {
+    if (isFileNotFoundError(error)) {
+      throw new UploadNotFoundError(uploadId);
+    }
 
-      throw error;
-    },
-  );
+    throw error;
+  });
 
   return JSON.parse(contents) as UploadMetadata;
 }
@@ -222,9 +235,20 @@ function sendUploadNotFoundError(reply: FastifyReply) {
   });
 }
 
+function sendInvalidStorageIdError(
+  reply: FastifyReply,
+  error: InvalidStorageIdError,
+) {
+  return reply.code(400).send({
+    error: "invalid_storage_id",
+    field: error.field,
+    message: error.message,
+  });
+}
+
 const getTranscriptToolRequestSchema = z.object({
   regenerate: z.boolean().optional(),
-  uploadId: z.string().min(1),
+  uploadId: storageIdSchema,
 });
 
 class RenderNotFoundError extends Error {
@@ -250,11 +274,15 @@ function isFileNotFoundError(error: unknown) {
 }
 
 function renderFileUrl(uploadId: string, renderId: string) {
-  return `/uploads/${uploadId}/renders/${renderId}/file`;
+  return `/uploads/${assertStorageId(uploadId, "uploadId")}/renders/${assertStorageId(renderId, "renderId")}/file`;
+}
+
+function absoluteMediaUrl(path: string) {
+  return `${publicMediaBaseUrl}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 function sourceFileUrl(uploadId: string) {
-  return `${internalMediaBaseUrl}/uploads/${uploadId}/file`;
+  return `${internalMediaBaseUrl}/uploads/${assertStorageId(uploadId, "uploadId")}/file`;
 }
 
 async function readRenderFileStats(uploadId: string, renderId: string) {
@@ -269,8 +297,57 @@ async function readRenderFileStats(uploadId: string, renderId: string) {
   );
 }
 
+async function createUploadRender(
+  uploadId: string,
+  clipInput: ClipRenderPlanInput | undefined,
+) {
+  await readUploadMetadata(uploadId);
+
+  const transcript = await readUploadTranscriptIfPresent(uploadId);
+  const clip = mergeClipRenderPlan(uploadId, clipInput, transcript);
+  const renderId = nanoid();
+  const renderDirectory = getUploadRenderDirectory(uploadId, renderId);
+  const outputPath = getUploadRenderOutputPath(uploadId, renderId);
+
+  await mkdir(renderDirectory, { recursive: true });
+  await writeFile(
+    getUploadRenderClipPath(uploadId, renderId),
+    `${JSON.stringify(clip, null, 2)}\n`,
+    "utf8",
+  );
+
+  await renderClipToFile({
+    bundleDirectory: dataRoot,
+    clip,
+    outputPath,
+    sourceUrl: sourceFileUrl(uploadId),
+  });
+
+  const outputStats = await stat(outputPath);
+  const url = renderFileUrl(uploadId, renderId);
+
+  return {
+    byteLength: outputStats.size,
+    clip,
+    createdAt: new Date().toISOString(),
+    id: renderId,
+    mimeType: "video/mp4" as const,
+    publicUrl: absoluteMediaUrl(url),
+    uploadId,
+    url,
+  };
+}
+
 const app = Fastify({
   logger: true,
+});
+
+app.setErrorHandler((error, _request, reply) => {
+  if (error instanceof InvalidStorageIdError) {
+    return sendInvalidStorageIdError(reply, error);
+  }
+
+  return reply.send(error);
 });
 
 const closeGracefully = async (signal: NodeJS.Signals) => {
@@ -303,6 +380,45 @@ await app.register(multipart, {
 
 app.get("/health", async () => {
   return { ok: true, service: "clipforge-api" };
+});
+
+const clipForgeMcpHandlers = {
+  getTranscript: async ({ regenerate, uploadId }) =>
+    await createOrReadTranscript(uploadId, regenerate),
+  renderClip: async ({ clip, uploadId }) =>
+    await createUploadRender(uploadId, clip),
+} satisfies Parameters<typeof createClipForgeMcpConnection>[0];
+
+app.all("/mcp", async (request, reply) => {
+  const clipForgeMcp = await createClipForgeMcpConnection(clipForgeMcpHandlers);
+
+  clipForgeMcp.transport.onerror = (error) => {
+    request.log.error({ error }, "MCP transport error");
+  };
+
+  reply.hijack();
+
+  try {
+    await clipForgeMcp.transport.handleRequest(
+      request.raw,
+      reply.raw,
+      request.body,
+    );
+  } catch (error) {
+    request.log.error({ error }, "MCP request failed");
+
+    if (!reply.raw.headersSent) {
+      reply.raw.writeHead(500, { "content-type": "application/json" });
+      reply.raw.end(
+        JSON.stringify({
+          error: "mcp_request_failed",
+          message: "Could not handle MCP request.",
+        }),
+      );
+    }
+  } finally {
+    await clipForgeMcp.server.close();
+  }
 });
 
 app.post("/uploads", async (request, reply) => {
@@ -397,6 +513,10 @@ app.get("/uploads/:uploadId", async (request, reply) => {
       },
     };
   } catch (error) {
+    if (error instanceof InvalidStorageIdError) {
+      return sendInvalidStorageIdError(reply, error);
+    }
+
     if (error instanceof UploadNotFoundError) {
       return sendUploadNotFoundError(reply);
     }
@@ -523,46 +643,14 @@ app.post("/uploads/:uploadId/renders", async (request, reply) => {
   }
 
   try {
-    await readUploadMetadata(uploadId);
-
-    const transcript = await readUploadTranscriptIfPresent(uploadId);
-    const clip = mergeClipRenderPlan(
-      uploadId,
-      parsedBody.data.clip,
-      transcript,
-    );
-    const renderId = nanoid();
-    const renderDirectory = getUploadRenderDirectory(uploadId, renderId);
-    const outputPath = getUploadRenderOutputPath(uploadId, renderId);
-
-    await mkdir(renderDirectory, { recursive: true });
-    await writeFile(
-      getUploadRenderClipPath(uploadId, renderId),
-      `${JSON.stringify(clip, null, 2)}\n`,
-      "utf8",
-    );
-
-    await renderClipToFile({
-      bundleDirectory: dataRoot,
-      clip,
-      outputPath,
-      sourceUrl: sourceFileUrl(uploadId),
-    });
-
-    const outputStats = await stat(outputPath);
-
     return reply.code(201).send({
-      render: {
-        byteLength: outputStats.size,
-        clip,
-        createdAt: new Date().toISOString(),
-        id: renderId,
-        mimeType: "video/mp4",
-        uploadId,
-        url: renderFileUrl(uploadId, renderId),
-      },
+      render: await createUploadRender(uploadId, parsedBody.data.clip),
     });
   } catch (error) {
+    if (error instanceof InvalidStorageIdError) {
+      return sendInvalidStorageIdError(reply, error);
+    }
+
     if (error instanceof UploadNotFoundError) {
       return sendUploadNotFoundError(reply);
     }

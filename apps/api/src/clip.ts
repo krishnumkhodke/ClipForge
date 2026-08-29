@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { storageIdSchema } from "./storage-id.js";
 import type { Transcript } from "./transcription.js";
 
 export const clipCaptionSchema = z.object({
@@ -22,14 +23,16 @@ const clipRenderPlanBaseSchema = z.object({
   output: clipOutputSchema.default({ fps: 30, height: 1920, width: 1080 }),
   startSeconds: z.number().nonnegative().default(0),
   title: z.string().min(1).default("ClipForge dummy clip"),
-  uploadId: z.string().min(1),
+  uploadId: storageIdSchema,
 });
 
-export const clipRenderPlanSchema = clipRenderPlanBaseSchema
-  .refine((clip) => clip.endSeconds > clip.startSeconds, {
+export const clipRenderPlanSchema = clipRenderPlanBaseSchema.refine(
+  (clip) => clip.endSeconds > clip.startSeconds,
+  {
     message: "endSeconds must be greater than startSeconds.",
     path: ["endSeconds"],
-  });
+  },
+);
 
 export const renderClipRequestSchema = z.object({
   clip: z
@@ -40,7 +43,7 @@ export const renderClipRequestSchema = z.object({
       output: clipOutputSchema.partial().optional(),
       startSeconds: z.number().nonnegative().optional(),
       title: z.string().min(1).optional(),
-      uploadId: z.string().min(1).optional(),
+      uploadId: storageIdSchema.optional(),
     })
     .optional(),
 });
