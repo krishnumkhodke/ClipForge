@@ -24,7 +24,7 @@ import {
 } from "@truefoundry/trueforge-ui";
 import {
   CLIPFORGE_DEFAULT_AGENT_SPEC,
-  withClipForgeAgentInstructions,
+  withClipForgeAgentConfiguration,
 } from "./clipforge-agent";
 
 type FocusedVideo = {
@@ -485,7 +485,7 @@ function ClipForgeFocusedVideoPanel({
     createSessionPromiseRef.current = (async () => {
       const createdSession = activeMode.isMutable
         ? await server.createSession({
-            agentSpec: withClipForgeAgentInstructions(activeMode.agentSpec),
+            agentSpec: withClipForgeAgentConfiguration(activeMode.agentSpec),
           })
         : await server.createSession(
             (activeMode.agentName ?? activeMode.agentId)

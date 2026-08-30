@@ -1,8 +1,15 @@
 "use client";
 
 import type { AgentSpec } from "@truefoundry/trueforge-ui";
+import type { HarnessAgentSpec } from "@truefoundry/trueforge-ui/plugins/trueforge-agent-server-adapter";
 
 const CLIPFORGE_INSTRUCTIONS_MARKER = "[ClipForge tool contract]";
+const CLIPFORGE_MEDIA_SERVER_NAME = "media_service";
+const CLIPFORGE_MEDIA_TOOLS = [
+  "get_video_metadata",
+  "get_transcript",
+  "render_clip",
+];
 
 export const CLIPFORGE_TURN_TOOL_CONTEXT =
   "ClipForge can use get_video_metadata, get_transcript, and render_clip for the focused video. Call get_video_metadata before planning when duration or format is not already known. For every render_clip call, always provide a segments array, including for a single range. Use one precise segment per non-contiguous requested moment; never use one broad range that includes unrelated gaps. Up to 8 ordered segments can be joined by cuts or the fixed chapter-card transition. Omit output width and height to preserve the uploaded video's native display aspect ratio; set them only when the user asks for a different format. The tool also supports title, captions as true/false or explicit caption segments, and fps. Do not offer unsupported controls such as custom subtitle styling, fonts, colors, crop mode, fades, wipes, music, B-roll, thumbnails, hooks, or arbitrary effects.";
@@ -32,15 +39,22 @@ Recommended flow:
 3. Before rendering, identify every precise source range needed by the request, remove unrelated gaps, and place those ranges in the segments array in output order. Then explain the intended clip briefly.
 4. After render_clip succeeds, return a concise summary and the generated video link. Do not end by offering unsupported render customizations.`;
 
-export const CLIPFORGE_DEFAULT_AGENT_SPEC: AgentSpec = {
+export const CLIPFORGE_DEFAULT_AGENT_SPEC: HarnessAgentSpec = {
   instructions: CLIPFORGE_AGENT_INSTRUCTIONS,
+  mcpServers: [
+    {
+      enableTools: CLIPFORGE_MEDIA_TOOLS,
+      name: CLIPFORGE_MEDIA_SERVER_NAME,
+      preload: true,
+    },
+  ],
   model: { name: "openai-main/gpt-4.1" },
 };
 
-export function withClipForgeAgentInstructions(
+export function withClipForgeAgentConfiguration(
   agentSpec?: AgentSpec,
 ): AgentSpec {
-  const base = agentSpec ?? CLIPFORGE_DEFAULT_AGENT_SPEC;
+  const base = (agentSpec ?? CLIPFORGE_DEFAULT_AGENT_SPEC) as HarnessAgentSpec;
   const existingInstructions = base.instructions?.trim();
   const markerIndex = existingInstructions?.indexOf(
     CLIPFORGE_INSTRUCTIONS_MARKER,
@@ -49,11 +63,29 @@ export function withClipForgeAgentInstructions(
     markerIndex !== undefined && markerIndex >= 0
       ? existingInstructions?.slice(0, markerIndex).trim()
       : existingInstructions;
+  const mediaServerIsConfigured = base.mcpServers?.some(
+    (server) => server.name === CLIPFORGE_MEDIA_SERVER_NAME,
+  );
+  const mcpServers = mediaServerIsConfigured
+    ? base.mcpServers?.map((server) =>
+        server.name === CLIPFORGE_MEDIA_SERVER_NAME
+          ? { ...server, preload: true }
+          : server,
+      )
+    : [
+        ...(base.mcpServers ?? []),
+        {
+          enableTools: CLIPFORGE_MEDIA_TOOLS,
+          name: CLIPFORGE_MEDIA_SERVER_NAME,
+          preload: true,
+        },
+      ];
 
   return {
     ...base,
     instructions: instructionsBeforeClipForge
       ? `${instructionsBeforeClipForge}\n\n${CLIPFORGE_AGENT_INSTRUCTIONS}`
       : CLIPFORGE_AGENT_INSTRUCTIONS,
+    mcpServers,
   };
 }
