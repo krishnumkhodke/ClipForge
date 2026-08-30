@@ -78,13 +78,6 @@ const uploadReferenceInputSchema = {
     .describe(
       "The TrueForge session id for the chat. Use this by default so ClipForge operates on the session's focused video.",
     ),
-  uploadId: z
-    .string()
-    .pipe(storageIdSchema)
-    .optional()
-    .describe(
-      "Optional ClipForge upload id for debugging. Prefer sessionId in normal chat use.",
-    ),
 };
 
 const getTranscriptInputSchema = {
@@ -171,10 +164,9 @@ export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
       inputSchema: getVideoMetadataInputSchema,
       title: "Get Video Metadata",
     },
-    async ({ sessionId, uploadId }) => {
+    async ({ sessionId }) => {
       const result = await handlers.getVideoMetadata({
         sessionId,
-        uploadId,
       });
 
       return jsonToolResult("Returned video metadata.", {
@@ -194,15 +186,14 @@ export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
         readOnlyHint: true,
       },
       description:
-        "Return a timestamped transcript and caption segments for the focused uploaded video. Prefer sessionId over uploadId in normal chat use.",
+        "Return a timestamped transcript and caption segments for the session's focused uploaded video.",
       inputSchema: getTranscriptInputSchema,
       title: "Get Transcript",
     },
-    async ({ regenerate = false, sessionId, uploadId }) => {
+    async ({ regenerate = false, sessionId }) => {
       const result = await handlers.getTranscript({
         regenerate,
         sessionId,
-        uploadId,
       });
 
       return jsonToolResult(
@@ -230,8 +221,8 @@ export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
       inputSchema: renderClipInputSchema,
       title: "Render Clip",
     },
-    async ({ clip, sessionId, uploadId }) => {
-      const render = await handlers.renderClip({ clip, sessionId, uploadId });
+    async ({ clip, sessionId }) => {
+      const render = await handlers.renderClip({ clip, sessionId });
       const compactRender = compactRenderResult(render);
 
       return jsonToolResult("Rendered clip.", {

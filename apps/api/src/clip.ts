@@ -69,12 +69,16 @@ const clipSegmentInputSchema = z
     path: ["endSeconds"],
   });
 
-const clipRenderInputFields = {
+const agentClipRenderInputFields = {
   captions: clipCaptionsInputSchema.optional(),
   id: z.string().min(1).optional(),
   output: clipOutputSchema.partial().optional(),
   schemaVersion: z.literal(2).optional(),
   title: z.string().min(1).optional(),
+};
+
+const clipRenderInputFields = {
+  ...agentClipRenderInputFields,
   uploadId: storageIdSchema.optional(),
 };
 
@@ -139,7 +143,7 @@ const clipRenderInputSchema = z
 
 export const agentClipRenderInputSchema = z
   .object({
-    ...clipRenderInputFields,
+    ...agentClipRenderInputFields,
     segments: clipSegmentsInputSchema,
   })
   .superRefine((clip, context) =>

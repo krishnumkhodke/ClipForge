@@ -503,31 +503,31 @@ async function resolveUploadId(input: {
   sessionId?: string | undefined;
   uploadId?: string | undefined;
 }) {
+  if (input.sessionId) {
+    const index = await readSessionUploadIndex(input.sessionId);
+
+    if (!index.focusedUploadId) {
+      throw new FocusedUploadNotFoundError(index.sessionId);
+    }
+
+    try {
+      await readUploadMetadata(index.focusedUploadId);
+    } catch (error) {
+      if (error instanceof UploadNotFoundError) {
+        throw new FocusedUploadNotFoundError(index.sessionId);
+      }
+
+      throw error;
+    }
+
+    return index.focusedUploadId;
+  }
+
   if (input.uploadId) {
     return assertStorageId(input.uploadId, "uploadId");
   }
 
-  if (!input.sessionId) {
-    throw new MissingUploadReferenceError();
-  }
-
-  const index = await readSessionUploadIndex(input.sessionId);
-
-  if (!index.focusedUploadId) {
-    throw new FocusedUploadNotFoundError(index.sessionId);
-  }
-
-  try {
-    await readUploadMetadata(index.focusedUploadId);
-  } catch (error) {
-    if (error instanceof UploadNotFoundError) {
-      throw new FocusedUploadNotFoundError(index.sessionId);
-    }
-
-    throw error;
-  }
-
-  return index.focusedUploadId;
+  throw new MissingUploadReferenceError();
 }
 
 function sendMissingUploadReferenceError(reply: FastifyReply) {
