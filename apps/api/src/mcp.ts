@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import {
+  agentClipRenderInputSchema,
   clipDurationSeconds,
   renderClipRequestSchema,
   type ClipRenderPlan,
@@ -79,8 +80,8 @@ const getTranscriptInputSchema = {
 
 const renderClipInputSchema = {
   ...uploadReferenceInputSchema,
-  clip: renderClipRequestSchema.shape.clip.describe(
-    'Clip render plan. For one source range, use startSeconds and endSeconds. For multiple ranges, use segments in output order (maximum 8), where each segment has startSeconds, endSeconds, and optional transitionAfter. transitionAfter may be {"kind":"cut"} or {"kind":"card","preset":"chapter","durationSeconds":0.8,"title":"Next chapter"}; a card is only valid after a non-final segment. captions may be true to automatically include and remap transcript captions, false for none, or an explicit caption array. Also supports id, title, and output width, height, and fps. Unsupported today: custom caption style, font, color, crop mode, visual overlap transitions such as fades or wipes, music, B-roll, and thumbnails.',
+  clip: agentClipRenderInputSchema.describe(
+    'Clip render plan. Always provide segments in output order, including when rendering only one range. Each segment has startSeconds, endSeconds, and optional transitionAfter; use a separate segment for each non-contiguous requested moment and never span unrelated gaps merely to include multiple moments. Supports at most 8 segments. transitionAfter may be {"kind":"cut"} or {"kind":"card","preset":"chapter","durationSeconds":0.8,"title":"Next chapter"}; a card is only valid after a non-final segment. captions may be true to automatically include and remap transcript captions, false for none, or an explicit caption array. Also supports id, title, and output width, height, and fps. Unsupported today: custom caption style, font, color, crop mode, visual overlap transitions such as fades or wipes, music, B-roll, and thumbnails.',
   ),
 };
 

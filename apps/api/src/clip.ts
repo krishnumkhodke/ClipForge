@@ -68,6 +68,20 @@ const clipSegmentInputSchema = z
     path: ["endSeconds"],
   });
 
+const clipRenderInputFields = {
+  captions: clipCaptionsInputSchema.optional(),
+  id: z.string().min(1).optional(),
+  output: clipOutputSchema.partial().optional(),
+  schemaVersion: z.literal(2).optional(),
+  title: z.string().min(1).optional(),
+  uploadId: storageIdSchema.optional(),
+};
+
+const clipSegmentsInputSchema = z
+  .array(clipSegmentInputSchema)
+  .min(1)
+  .max(MAX_CLIP_SEGMENTS);
+
 function validateLastSegmentTransition(
   segments: Array<{ transitionAfter?: z.infer<typeof clipTransitionSchema> }>,
   context: z.core.$RefinementCtx,
@@ -99,19 +113,10 @@ export const clipRenderPlanSchema = z
 
 const clipRenderInputSchema = z
   .object({
-    captions: clipCaptionsInputSchema.optional(),
+    ...clipRenderInputFields,
     endSeconds: z.number().positive().optional(),
-    id: z.string().min(1).optional(),
-    output: clipOutputSchema.partial().optional(),
-    schemaVersion: z.literal(2).optional(),
-    segments: z
-      .array(clipSegmentInputSchema)
-      .min(1)
-      .max(MAX_CLIP_SEGMENTS)
-      .optional(),
+    segments: clipSegmentsInputSchema.optional(),
     startSeconds: z.number().nonnegative().optional(),
-    title: z.string().min(1).optional(),
-    uploadId: storageIdSchema.optional(),
   })
   .superRefine((clip, context) => {
     if (
@@ -130,6 +135,15 @@ const clipRenderInputSchema = z
       validateLastSegmentTransition(clip.segments, context);
     }
   });
+
+export const agentClipRenderInputSchema = z
+  .object({
+    ...clipRenderInputFields,
+    segments: clipSegmentsInputSchema,
+  })
+  .superRefine((clip, context) =>
+    validateLastSegmentTransition(clip.segments, context),
+  );
 
 export const renderClipRequestSchema = z.object({
   clip: clipRenderInputSchema.optional(),
