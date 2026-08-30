@@ -5,6 +5,7 @@ type ProbeStream = {
   avg_frame_rate?: string;
   codec_name?: string;
   codec_type?: "audio" | "video";
+  disposition?: { attached_pic?: number };
   duration?: string;
   height?: number;
   r_frame_rate?: string;
@@ -35,6 +36,13 @@ export class MediaProbeError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "MediaProbeError";
+  }
+}
+
+export class MediaProbeUnavailableError extends MediaProbeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "MediaProbeUnavailableError";
   }
 }
 
@@ -99,7 +107,7 @@ async function runFfprobe(sourcePath: string) {
         "-v",
         "error",
         "-show_entries",
-        "format=duration:stream=codec_type,codec_name,width,height,duration,avg_frame_rate,r_frame_rate:stream_tags=rotate:stream_side_data=rotation",
+        "format=duration:stream=codec_type,codec_name,width,height,duration,avg_frame_rate,r_frame_rate:stream_tags=rotate:stream_side_data=rotation:stream_disposition=attached_pic",
         "-of",
         "json",
         sourcePath,
@@ -113,7 +121,7 @@ async function runFfprobe(sourcePath: string) {
     child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
     child.on("error", (error) => {
       reject(
-        new MediaProbeError(
+        new MediaProbeUnavailableError(
           `${command} could not be started: ${error.message}`,
         ),
       );
@@ -146,7 +154,8 @@ export async function probeVideoMetadata(
   }
 
   const videoStream = output.streams?.find(
-    (stream) => stream.codec_type === "video",
+    (stream) =>
+      stream.codec_type === "video" && stream.disposition?.attached_pic !== 1,
   );
   const audioStream = output.streams?.find(
     (stream) => stream.codec_type === "audio",
@@ -171,9 +180,9 @@ export async function probeVideoMetadata(
   const width = swapsDimensions ? videoStream.height : videoStream.width;
   const height = swapsDimensions ? videoStream.width : videoStream.height;
   const divisor = greatestCommonDivisor(width, height);
-  const fps = parseFrameRate(
-    videoStream.avg_frame_rate ?? videoStream.r_frame_rate,
-  );
+  const fps =
+    parseFrameRate(videoStream.avg_frame_rate) ??
+    parseFrameRate(videoStream.r_frame_rate);
 
   return {
     aspectRatio: Math.round((width / height) * 1_000_000) / 1_000_000,

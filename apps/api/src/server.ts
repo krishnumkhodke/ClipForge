@@ -10,13 +10,18 @@ import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import {
+  ClipSourceRangeError,
   mergeClipRenderPlan,
   renderClipRequestSchema,
   type ClipRenderPlanInput,
   type ClipRenderPlan,
 } from "./clip.js";
 import { createClipForgeMcpConnection } from "./mcp.js";
-import { MediaProbeError, probeVideoMetadata } from "./media-probe.js";
+import {
+  MediaProbeError,
+  MediaProbeUnavailableError,
+  probeVideoMetadata,
+} from "./media-probe.js";
 import { renderClipToFile } from "./rendering.js";
 import {
   assertStorageId,
@@ -554,6 +559,28 @@ function sendSessionUploadResolutionError(reply: FastifyReply, error: unknown) {
   return undefined;
 }
 
+function sendInvalidClipError(reply: FastifyReply, error: unknown) {
+  if (!(error instanceof ClipSourceRangeError)) {
+    return undefined;
+  }
+
+  return reply.code(400).send({
+    error: "invalid_clip",
+    message: error.message,
+  });
+}
+
+function sendMediaProbeUnavailableError(reply: FastifyReply, error: unknown) {
+  if (!(error instanceof MediaProbeUnavailableError)) {
+    return undefined;
+  }
+
+  return reply.code(503).send({
+    error: "media_probe_unavailable",
+    message: "Video inspection is temporarily unavailable. Try again.",
+  });
+}
+
 const app = Fastify({
   logger: true,
 });
@@ -561,6 +588,16 @@ const app = Fastify({
 app.setErrorHandler((error, _request, reply) => {
   if (error instanceof InvalidStorageIdError) {
     return sendInvalidStorageIdError(reply, error);
+  }
+
+  const invalidClipResponse = sendInvalidClipError(reply, error);
+  if (invalidClipResponse) {
+    return invalidClipResponse;
+  }
+
+  const probeUnavailableResponse = sendMediaProbeUnavailableError(reply, error);
+  if (probeUnavailableResponse) {
+    return probeUnavailableResponse;
   }
 
   return reply.send(error);
@@ -734,6 +771,14 @@ async function storeUpload(
   } catch (error) {
     await rm(uploadDirectory, { force: true, recursive: true });
     request.log.error({ error, uploadId }, "Failed to store upload");
+
+    const probeUnavailableResponse = sendMediaProbeUnavailableError(
+      reply,
+      error,
+    );
+    if (probeUnavailableResponse) {
+      return probeUnavailableResponse;
+    }
 
     if (error instanceof MediaProbeError) {
       return reply.code(422).send({
@@ -1005,6 +1050,14 @@ app.post("/tools/get-video-metadata", async (request, reply) => {
       return sendUploadNotFoundError(reply);
     }
 
+    const probeUnavailableResponse = sendMediaProbeUnavailableError(
+      reply,
+      error,
+    );
+    if (probeUnavailableResponse) {
+      return probeUnavailableResponse;
+    }
+
     if (error instanceof MediaProbeError) {
       return reply.code(422).send({
         error: "video_metadata_unavailable",
@@ -1081,6 +1134,11 @@ app.post("/tools/render-clip", async (request, reply) => {
       return sendUploadNotFoundError(reply);
     }
 
+    const invalidClipResponse = sendInvalidClipError(reply, error);
+    if (invalidClipResponse) {
+      return invalidClipResponse;
+    }
+
     throw error;
   }
 });
@@ -1107,6 +1165,11 @@ app.post("/uploads/:uploadId/renders", async (request, reply) => {
 
     if (error instanceof UploadNotFoundError) {
       return sendUploadNotFoundError(reply);
+    }
+
+    const invalidClipResponse = sendInvalidClipError(reply, error);
+    if (invalidClipResponse) {
+      return invalidClipResponse;
     }
 
     request.log.error({ error, uploadId }, "Failed to render clip");
@@ -1143,6 +1206,11 @@ app.post("/sessions/:sessionId/renders", async (request, reply) => {
 
     if (error instanceof UploadNotFoundError) {
       return sendUploadNotFoundError(reply);
+    }
+
+    const invalidClipResponse = sendInvalidClipError(reply, error);
+    if (invalidClipResponse) {
+      return invalidClipResponse;
     }
 
     throw error;

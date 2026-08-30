@@ -156,11 +156,34 @@ export type ClipSegment = z.infer<typeof clipSegmentSchema>;
 export type ClipRenderPlan = z.infer<typeof clipRenderPlanSchema>;
 export type ClipRenderPlanInput = z.infer<typeof clipRenderInputSchema>;
 
-export function clipSegmentDurationInFrames(segment: ClipSegment, fps: number) {
-  return Math.max(
-    1,
-    Math.round((segment.endSeconds - segment.startSeconds) * fps),
+export class ClipSourceRangeError extends Error {
+  constructor(
+    readonly segmentIndex: number,
+    readonly durationSeconds: number,
+  ) {
+    super(
+      `Segment ${segmentIndex + 1} must stay within the source video duration of ${durationSeconds} seconds.`,
+    );
+    this.name = "ClipSourceRangeError";
+  }
+}
+
+export function clipSegmentFrameRange(segment: ClipSegment, fps: number) {
+  const startFrame = Math.round(segment.startSeconds * fps);
+  const endFrame = Math.max(
+    startFrame + 1,
+    Math.round(segment.endSeconds * fps),
   );
+
+  return {
+    durationInFrames: endFrame - startFrame,
+    endFrame,
+    startFrame,
+  };
+}
+
+export function clipSegmentDurationInFrames(segment: ClipSegment, fps: number) {
+  return clipSegmentFrameRange(segment, fps).durationInFrames;
 }
 
 export function clipTransitionDurationInFrames(
@@ -318,6 +341,27 @@ function normalizeSegments(
   ];
 }
 
+function validateSegmentsWithinVideo(
+  segments: ClipSegment[],
+  video: VideoMetadata | undefined,
+  fps: number,
+) {
+  if (!video) {
+    return;
+  }
+
+  const frameToleranceSeconds = 1 / fps;
+
+  segments.forEach((segment, index) => {
+    if (
+      segment.startSeconds >= video.durationSeconds ||
+      segment.endSeconds > video.durationSeconds + frameToleranceSeconds
+    ) {
+      throw new ClipSourceRangeError(index, video.durationSeconds);
+    }
+  });
+}
+
 export function buildDummyClipRenderPlan(
   uploadId: string,
   transcript?: Transcript,
@@ -363,6 +407,8 @@ export function mergeClipRenderPlan(
     ...fallback.output,
     ...clip?.output,
   };
+
+  validateSegmentsWithinVideo(segments, video, output.fps);
 
   return clipRenderPlanSchema.parse({
     ...fallback,

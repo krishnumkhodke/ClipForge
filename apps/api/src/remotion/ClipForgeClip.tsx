@@ -21,7 +21,7 @@ export type ClipForgeClipProps = {
 
 function getActiveCaption(captions: ClipCaption[], elapsedMs: number) {
   return captions.find(
-    (caption) => elapsedMs >= caption.startMs && elapsedMs <= caption.endMs,
+    (caption) => elapsedMs >= caption.startMs && elapsedMs < caption.endMs,
   );
 }
 

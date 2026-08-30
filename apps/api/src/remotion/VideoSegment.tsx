@@ -1,5 +1,9 @@
 import { AbsoluteFill, OffthreadVideo, useVideoConfig } from "remotion";
-import type { ClipRenderPlan, ClipSegment } from "../clip.js";
+import {
+  clipSegmentFrameRange,
+  type ClipRenderPlan,
+  type ClipSegment,
+} from "../clip.js";
 
 type VideoSegmentProps = {
   clip: ClipRenderPlan;
@@ -13,6 +17,7 @@ export const VideoSegment = ({
   sourceUrl,
 }: VideoSegmentProps) => {
   const { fps, height, width } = useVideoConfig();
+  const { endFrame, startFrame } = clipSegmentFrameRange(segment, fps);
   const layoutScale = Math.min(
     1,
     Math.max(0.6, Math.min(width / 1080, height / 1920)),
@@ -27,8 +32,8 @@ export const VideoSegment = ({
           objectFit: "cover",
           width: "100%",
         }}
-        trimAfter={Math.round(segment.endSeconds * fps)}
-        trimBefore={Math.round(segment.startSeconds * fps)}
+        trimAfter={endFrame}
+        trimBefore={startFrame}
         volume={1}
       />
       <AbsoluteFill
