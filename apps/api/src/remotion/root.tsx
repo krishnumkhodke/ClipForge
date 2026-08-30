@@ -1,4 +1,5 @@
 import { Composition, type CalculateMetadataFunction } from "remotion";
+import { clipDurationInFrames } from "../clip.js";
 import { ClipForgeClip, type ClipForgeClipProps } from "./ClipForgeClip.js";
 
 const fps = 30;
@@ -6,13 +7,8 @@ const fps = 30;
 const calculateMetadata: CalculateMetadataFunction<ClipForgeClipProps> = ({
   props,
 }) => {
-  const durationInFrames = Math.max(
-    1,
-    Math.ceil((props.clip.endSeconds - props.clip.startSeconds) * fps),
-  );
-
   return {
-    durationInFrames,
+    durationInFrames: clipDurationInFrames(props.clip),
     fps: props.clip.output.fps,
     height: props.clip.output.height,
     props,
@@ -28,14 +24,20 @@ export const Root = () => {
       defaultProps={{
         clip: {
           captions: [],
-          endSeconds: 15,
           id: "dummy-clip",
           output: {
             fps,
             height: 1920,
             width: 1080,
           },
-          startSeconds: 0,
+          schemaVersion: 2,
+          segments: [
+            {
+              endSeconds: 15,
+              id: "segment-1",
+              startSeconds: 0,
+            },
+          ],
           title: "ClipForge dummy clip",
           uploadId: "demo",
         },

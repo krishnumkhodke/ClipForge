@@ -3,6 +3,7 @@
   "globalEnv": [
     "CLIPFORGE_API_BASE_URL",
     "FFMPEG_PATH",
+    "FFPROBE_PATH",
     "MEDIA_ALLOWED_ORIGINS",
     "MEDIA_API_BASE_URL",
     "MEDIA_DATA_DIR",

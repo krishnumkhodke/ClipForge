@@ -1,13 +1,29 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { renderClipRequestSchema, type ClipRenderPlan } from "./clip.js";
+import {
+  agentClipRenderInputSchema,
+  clipDurationSeconds,
+  renderClipRequestSchema,
+  type ClipRenderPlan,
+} from "./clip.js";
 import { storageIdSchema } from "./storage-id.js";
 import type { Transcript } from "./transcription.js";
+import type { VideoMetadata } from "./media-probe.js";
 
 type TranscriptResult = {
   cached: boolean;
   transcript: Transcript;
+};
+
+type VideoMetadataResult = {
+  metadata: VideoMetadata & {
+    byteLength: number;
+    createdAt: string;
+    filename: string;
+    mimeType: string;
+    uploadId: string;
+  };
 };
 
 type RenderResult = {
@@ -27,6 +43,12 @@ type UploadReferenceInput = {
 };
 
 type ClipForgeMcpHandlers = {
+  getVideoMetadata(input: UploadReferenceInput): Promise<
+    VideoMetadataResult & {
+      sessionId?: string | undefined;
+      uploadId: string;
+    }
+  >;
   getTranscript(
     input: {
       regenerate: boolean;
@@ -73,10 +95,14 @@ const getTranscriptInputSchema = {
     .describe("Regenerate the transcript instead of returning a cached one."),
 };
 
+const getVideoMetadataInputSchema = {
+  ...uploadReferenceInputSchema,
+};
+
 const renderClipInputSchema = {
   ...uploadReferenceInputSchema,
-  clip: renderClipRequestSchema.shape.clip.describe(
-    "Clip render plan. Supported fields are id, title, startSeconds, endSeconds, captions, and output width, height, and fps. captions may be true for transcript captions, false for no captions, or an explicit caption array. Unsupported today: caption style, font, color, crop mode, transitions, music, B-roll, thumbnails, and multi-clip sequences.",
+  clip: agentClipRenderInputSchema.describe(
+    'Clip render plan. Always provide segments in output order, including when rendering only one range. Each segment has startSeconds, endSeconds, and optional transitionAfter; use a separate segment for each non-contiguous requested moment and never span unrelated gaps merely to include multiple moments. Supports at most 8 segments. transitionAfter may be {"kind":"cut"} or {"kind":"card","preset":"chapter","durationSeconds":0.8,"title":"Next chapter"}; a card is only valid after a non-final segment. captions may be true to automatically include and remap transcript captions, false for none, or an explicit caption array. Also supports id, title, and output width, height, and fps. Unsupported today: custom caption style, font, color, crop mode, visual overlap transitions such as fades or wipes, music, B-roll, and thumbnails.',
   ),
 };
 
@@ -114,10 +140,11 @@ function compactRenderResult(render: RenderResult) {
   return {
     ...renderMetadata,
     clip: {
-      endSeconds: clip.endSeconds,
+      durationSeconds: clipDurationSeconds(clip),
       id: clip.id,
       output: clip.output,
-      startSeconds: clip.startSeconds,
+      schemaVersion: clip.schemaVersion,
+      segments: clip.segments,
       title: clip.title,
       uploadId: clip.uploadId,
     },
@@ -129,6 +156,33 @@ export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
     name: "clipforge-media",
     version: "0.1.0",
   });
+
+  server.registerTool(
+    "get_video_metadata",
+    {
+      annotations: {
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+        readOnlyHint: true,
+      },
+      description:
+        "Return technical metadata for the focused uploaded video, including duration, display dimensions, aspect ratio, frame rate, rotation, codecs, audio presence, file size, and MIME type. Use this before planning ranges or changing output dimensions.",
+      inputSchema: getVideoMetadataInputSchema,
+      title: "Get Video Metadata",
+    },
+    async ({ sessionId, uploadId }) => {
+      const result = await handlers.getVideoMetadata({
+        sessionId,
+        uploadId,
+      });
+
+      return jsonToolResult("Returned video metadata.", {
+        metadata: result.metadata,
+        ...uploadReferenceSummary(result),
+      });
+    },
+  );
 
   server.registerTool(
     "get_transcript",
@@ -172,7 +226,7 @@ export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
         readOnlyHint: false,
       },
       description:
-        "Render one uploaded video segment into an MP4 using ClipForge's current fixed template. This tool can choose timing, title, captions on/off or explicit caption segments, width, height, and fps only; it cannot customize subtitle styling, fonts, colors, crop strategy, transitions, music, B-roll, thumbnails, or multi-clip sequences.",
+        "Render one or more ordered ranges from the focused uploaded video into one MP4. Ranges can be joined by plain cuts or ClipForge's fixed chapter-card transition. The tool can choose timing, order, chapter-card title and duration, clip title, captions, width, height, and fps. It cannot customize subtitle styling, fonts, colors, crop strategy, visual overlap transitions, music, B-roll, or thumbnails.",
       inputSchema: renderClipInputSchema,
       title: "Render Clip",
     },
