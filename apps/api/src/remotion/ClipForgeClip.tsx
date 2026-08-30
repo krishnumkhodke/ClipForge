@@ -27,7 +27,11 @@ function getActiveCaption(captions: ClipCaption[], elapsedMs: number) {
 
 export const ClipForgeClip = ({ clip, sourceUrl }: ClipForgeClipProps) => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
+  const { fps, height, width } = useVideoConfig();
+  const layoutScale = Math.min(
+    1,
+    Math.max(0.5, Math.min(width / 1080, height / 1920)),
+  );
   const elapsedMs = (frame / fps) * 1000;
   const activeCaption = getActiveCaption(clip.captions, elapsedMs);
   const captionFrame = activeCaption
@@ -76,12 +80,12 @@ export const ClipForgeClip = ({ clip, sourceUrl }: ClipForgeClipProps) => {
       <div
         style={{
           alignItems: "center",
-          bottom: 170,
+          bottom: 170 * layoutScale,
           display: "flex",
           justifyContent: "center",
-          left: 72,
+          left: 72 * layoutScale,
           position: "absolute",
-          right: 72,
+          right: 72 * layoutScale,
           textAlign: "center",
         }}
       >
@@ -89,19 +93,19 @@ export const ClipForgeClip = ({ clip, sourceUrl }: ClipForgeClipProps) => {
           <div
             style={{
               backgroundColor: "rgba(0, 0, 0, 0.72)",
-              borderRadius: 18,
+              borderRadius: 18 * layoutScale,
               boxShadow: "0 18px 48px rgba(0, 0, 0, 0.35)",
               color: "white",
               fontFamily:
                 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-              fontSize: 58,
+              fontSize: 58 * layoutScale,
               fontWeight: 800,
               lineHeight: 1.12,
               opacity: interpolate(captionFrame, [0, 8], [0, 1], {
                 extrapolateLeft: "clamp",
                 extrapolateRight: "clamp",
               }),
-              padding: "26px 34px",
+              padding: `${26 * layoutScale}px ${34 * layoutScale}px`,
               textShadow: "0 2px 8px rgba(0,0,0,0.45)",
             }}
           >

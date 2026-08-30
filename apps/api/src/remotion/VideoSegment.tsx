@@ -12,7 +12,11 @@ export const VideoSegment = ({
   segment,
   sourceUrl,
 }: VideoSegmentProps) => {
-  const { fps } = useVideoConfig();
+  const { fps, height, width } = useVideoConfig();
+  const layoutScale = Math.min(
+    1,
+    Math.max(0.6, Math.min(width / 1080, height / 1920)),
+  );
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#080808" }}>
@@ -38,13 +42,13 @@ export const VideoSegment = ({
           color: "rgba(255, 255, 255, 0.82)",
           fontFamily:
             'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-          fontSize: 30,
+          fontSize: 30 * layoutScale,
           fontWeight: 700,
-          left: 56,
+          left: 56 * layoutScale,
           letterSpacing: 0,
           position: "absolute",
-          right: 56,
-          top: 52,
+          right: 56 * layoutScale,
+          top: 52 * layoutScale,
         }}
       >
         {clip.title}

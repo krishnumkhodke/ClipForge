@@ -16,6 +16,10 @@ type ClipForgeRenderResult = {
   render: {
     byteLength?: number;
     clip?: {
+      output?: {
+        height?: number;
+        width?: number;
+      };
       title?: string;
     };
     id?: string;
@@ -115,12 +119,25 @@ function RenderVideoPreview({
   fullscreen?: boolean;
   render: ClipForgeRenderResult["render"];
 }) {
+  const width = render.clip?.output?.width;
+  const height = render.clip?.output?.height;
+  const isPortrait = Boolean(width && height && width < height);
+
   return (
     <video
       className={
         fullscreen
           ? "mx-auto h-full max-h-full w-full bg-neutral-950 object-contain"
-          : "mx-auto aspect-[9/16] max-h-[28rem] w-full max-w-[18rem] bg-neutral-950 object-contain"
+          : `mx-auto block max-h-[28rem] w-full bg-neutral-950 object-contain ${
+              isPortrait ? "max-w-[18rem]" : "max-w-full"
+            }`
+      }
+      style={
+        width && height
+          ? {
+              aspectRatio: `${width} / ${height}`,
+            }
+          : undefined
       }
       src={render.publicUrl}
       controls

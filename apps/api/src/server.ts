@@ -2,7 +2,7 @@ import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { extname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import { pipeline } from "node:stream/promises";
@@ -16,6 +16,7 @@ import {
   type ClipRenderPlan,
 } from "./clip.js";
 import { createClipForgeMcpConnection } from "./mcp.js";
+import { MediaProbeError, probeVideoMetadata } from "./media-probe.js";
 import { renderClipToFile } from "./rendering.js";
 import {
   assertStorageId,
@@ -143,7 +144,36 @@ async function readUploadMetadata(uploadId: string) {
     throw error;
   });
 
-  return JSON.parse(contents) as UploadMetadata;
+  const metadata = JSON.parse(contents) as UploadMetadata;
+
+  if (metadata.video) {
+    return metadata;
+  }
+
+  const backfilledMetadata = {
+    ...metadata,
+    video: await probeVideoMetadata(metadata.sourcePath),
+  };
+
+  await writeUploadMetadata(backfilledMetadata);
+
+  return backfilledMetadata;
+}
+
+async function writeUploadMetadata(metadata: UploadMetadata) {
+  const metadataPath = getUploadMetadataPath(metadata.id);
+  const temporaryPath = `${metadataPath}.${nanoid()}.tmp`;
+
+  try {
+    await writeFile(
+      temporaryPath,
+      `${JSON.stringify(metadata, null, 2)}\n`,
+      "utf8",
+    );
+    await rename(temporaryPath, metadataPath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
 }
 
 async function readSessionUploadIndex(
@@ -206,6 +236,22 @@ function toUploadResponse(metadata: UploadMetadata) {
     originalFilename: metadata.originalFilename,
     trueforgeSessionId: metadata.trueforgeSessionId,
     url: `/uploads/${metadata.id}/file`,
+    video: metadata.video,
+  };
+}
+
+function toVideoMetadataResponse(metadata: UploadMetadata) {
+  if (!metadata.video) {
+    throw new MediaProbeError("Video metadata is unavailable.");
+  }
+
+  return {
+    byteLength: metadata.byteLength,
+    createdAt: metadata.createdAt,
+    filename: metadata.originalFilename,
+    mimeType: metadata.mimeType,
+    uploadId: metadata.id,
+    ...metadata.video,
   };
 }
 
@@ -323,6 +369,10 @@ const getTranscriptToolRequestSchema = z.object({
   sessionId: storageIdSchema.optional(),
   uploadId: storageIdSchema.optional(),
 });
+const getVideoMetadataToolRequestSchema = z.object({
+  sessionId: storageIdSchema.optional(),
+  uploadId: storageIdSchema.optional(),
+});
 const renderClipToolRequestSchema = renderClipRequestSchema.extend({
   sessionId: storageIdSchema.optional(),
   uploadId: storageIdSchema.optional(),
@@ -401,10 +451,15 @@ async function createUploadRender(
   uploadId: string,
   clipInput: ClipRenderPlanInput | undefined,
 ) {
-  await readUploadMetadata(uploadId);
+  const metadata = await readUploadMetadata(uploadId);
 
   const transcript = await readUploadTranscriptIfPresent(uploadId);
-  const clip = mergeClipRenderPlan(uploadId, clipInput, transcript);
+  const clip = mergeClipRenderPlan(
+    uploadId,
+    clipInput,
+    transcript,
+    metadata.video,
+  );
   const renderId = nanoid();
   const renderDirectory = getUploadRenderDirectory(uploadId, renderId);
   const outputPath = getUploadRenderOutputPath(uploadId, renderId);
@@ -483,10 +538,7 @@ function sendFocusedUploadNotFoundError(reply: FastifyReply) {
   });
 }
 
-function sendSessionUploadResolutionError(
-  reply: FastifyReply,
-  error: unknown,
-) {
+function sendSessionUploadResolutionError(reply: FastifyReply, error: unknown) {
   if (error instanceof InvalidStorageIdError) {
     return sendInvalidStorageIdError(reply, error);
   }
@@ -547,6 +599,16 @@ app.get("/health", async () => {
 });
 
 const clipForgeMcpHandlers = {
+  getVideoMetadata: async ({ sessionId, uploadId }) => {
+    const resolvedUploadId = await resolveUploadId({ sessionId, uploadId });
+    const metadata = await readUploadMetadata(resolvedUploadId);
+
+    return {
+      metadata: toVideoMetadataResponse(metadata),
+      ...(sessionId ? { sessionId } : {}),
+      uploadId: resolvedUploadId,
+    };
+  },
   getTranscript: async ({ regenerate, sessionId, uploadId }) => {
     const resolvedUploadId = await resolveUploadId({ sessionId, uploadId });
 
@@ -644,6 +706,7 @@ async function storeUpload(
     }
 
     const fileStats = await stat(sourcePath);
+    const video = await probeVideoMetadata(sourcePath);
     const metadata: UploadMetadata = {
       byteLength: fileStats.size,
       createdAt: new Date().toISOString(),
@@ -652,16 +715,17 @@ async function storeUpload(
       originalFilename: safeFilename,
       sourcePath,
       ...(trueforgeSessionId ? { trueforgeSessionId } : {}),
+      video,
     };
 
-    await writeFile(
-      getUploadMetadataPath(uploadId),
-      `${JSON.stringify(metadata, null, 2)}\n`,
-      "utf8",
-    );
+    await writeUploadMetadata(metadata);
 
     if (trueforgeSessionId) {
-      await addUploadToSession(trueforgeSessionId, uploadId, metadata.createdAt);
+      await addUploadToSession(
+        trueforgeSessionId,
+        uploadId,
+        metadata.createdAt,
+      );
     }
 
     return reply.code(201).send({
@@ -670,6 +734,13 @@ async function storeUpload(
   } catch (error) {
     await rm(uploadDirectory, { force: true, recursive: true });
     request.log.error({ error, uploadId }, "Failed to store upload");
+
+    if (error instanceof MediaProbeError) {
+      return reply.code(422).send({
+        error: "invalid_video",
+        message: error.message,
+      });
+    }
 
     throw error;
   }
@@ -898,6 +969,47 @@ app.post("/sessions/:sessionId/transcript", async (request, reply) => {
 
     if (error instanceof UploadNotFoundError) {
       return sendUploadNotFoundError(reply);
+    }
+
+    throw error;
+  }
+});
+
+app.post("/tools/get-video-metadata", async (request, reply) => {
+  const parsedBody = getVideoMetadataToolRequestSchema.safeParse(
+    request.body ?? {},
+  );
+
+  if (!parsedBody.success) {
+    return reply.code(400).send({
+      error: "invalid_tool_arguments",
+      message: "Provide a sessionId or uploadId.",
+    });
+  }
+
+  try {
+    const uploadId = await resolveUploadId(parsedBody.data);
+    const metadata = await readUploadMetadata(uploadId);
+
+    return {
+      metadata: toVideoMetadataResponse(metadata),
+      uploadId,
+    };
+  } catch (error) {
+    const resolutionResponse = sendSessionUploadResolutionError(reply, error);
+    if (resolutionResponse) {
+      return resolutionResponse;
+    }
+
+    if (error instanceof UploadNotFoundError) {
+      return sendUploadNotFoundError(reply);
+    }
+
+    if (error instanceof MediaProbeError) {
+      return reply.code(422).send({
+        error: "video_metadata_unavailable",
+        message: error.message,
+      });
     }
 
     throw error;

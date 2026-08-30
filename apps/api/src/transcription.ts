@@ -3,6 +3,7 @@ import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import process from "node:process";
 import { nanoid } from "nanoid";
+import type { VideoMetadata } from "./media-probe.js";
 
 export type UploadMetadata = {
   byteLength: number;
@@ -12,6 +13,7 @@ export type UploadMetadata = {
   originalFilename: string;
   sourcePath: string;
   trueforgeSessionId?: string;
+  video?: VideoMetadata;
 };
 
 export type TranscriptSegment = {
@@ -222,12 +224,12 @@ async function transcribeAudioWithOpenAI(audioPath: string) {
   if (!response.ok) {
     throw new TranscriptionProviderError(
       body &&
-      typeof body === "object" &&
-      "error" in body &&
-      body.error &&
-      typeof body.error === "object" &&
-      "message" in body.error &&
-      typeof body.error.message === "string"
+        typeof body === "object" &&
+        "error" in body &&
+        body.error &&
+        typeof body.error === "object" &&
+        "message" in body.error &&
+        typeof body.error.message === "string"
         ? body.error.message
         : "OpenAI transcription request failed.",
     );

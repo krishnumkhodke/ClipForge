@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { VideoMetadata } from "./media-probe.js";
 import { storageIdSchema } from "./storage-id.js";
 import type { Transcript } from "./transcription.js";
 
@@ -320,9 +321,13 @@ function normalizeSegments(
 export function buildDummyClipRenderPlan(
   uploadId: string,
   transcript?: Transcript,
+  video?: VideoMetadata,
 ): ClipRenderPlan {
   const startSeconds = 0;
-  const endSeconds = Math.min(transcript?.durationSeconds ?? 15, 15);
+  const endSeconds = Math.min(
+    transcript?.durationSeconds ?? video?.durationSeconds ?? 15,
+    15,
+  );
   const segments = [
     clipSegmentSchema.parse({
       endSeconds,
@@ -330,14 +335,14 @@ export function buildDummyClipRenderPlan(
       startSeconds,
     }),
   ];
+  const defaultOutput = defaultOutputDimensions(video);
 
   return clipRenderPlanSchema.parse({
     captions: captionsForClip(transcript, segments, 30),
     id: "dummy-clip",
     output: {
       fps: 30,
-      height: 1920,
-      width: 1080,
+      ...defaultOutput,
     },
     schemaVersion: 2,
     segments,
@@ -350,8 +355,9 @@ export function mergeClipRenderPlan(
   uploadId: string,
   clip: ClipRenderPlanInput | undefined,
   transcript?: Transcript,
+  video?: VideoMetadata,
 ) {
-  const fallback = buildDummyClipRenderPlan(uploadId, transcript);
+  const fallback = buildDummyClipRenderPlan(uploadId, transcript, video);
   const segments = normalizeSegments(clip, fallback);
   const output = {
     ...fallback.output,
@@ -372,4 +378,25 @@ export function mergeClipRenderPlan(
     segments,
     uploadId,
   });
+}
+
+function evenDimension(dimension: number) {
+  return Math.max(2, dimension - (dimension % 2));
+}
+
+function defaultOutputDimensions(video: VideoMetadata | undefined) {
+  if (!video) {
+    return { height: 1920, width: 1080 };
+  }
+
+  const maxDefaultEdge = 1920;
+  const scale = Math.min(
+    1,
+    maxDefaultEdge / Math.max(video.width, video.height),
+  );
+
+  return {
+    height: evenDimension(Math.round(video.height * scale)),
+    width: evenDimension(Math.round(video.width * scale)),
+  };
 }

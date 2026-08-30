@@ -9,10 +9,21 @@ import {
 } from "./clip.js";
 import { storageIdSchema } from "./storage-id.js";
 import type { Transcript } from "./transcription.js";
+import type { VideoMetadata } from "./media-probe.js";
 
 type TranscriptResult = {
   cached: boolean;
   transcript: Transcript;
+};
+
+type VideoMetadataResult = {
+  metadata: VideoMetadata & {
+    byteLength: number;
+    createdAt: string;
+    filename: string;
+    mimeType: string;
+    uploadId: string;
+  };
 };
 
 type RenderResult = {
@@ -32,6 +43,12 @@ type UploadReferenceInput = {
 };
 
 type ClipForgeMcpHandlers = {
+  getVideoMetadata(input: UploadReferenceInput): Promise<
+    VideoMetadataResult & {
+      sessionId?: string | undefined;
+      uploadId: string;
+    }
+  >;
   getTranscript(
     input: {
       regenerate: boolean;
@@ -76,6 +93,10 @@ const getTranscriptInputSchema = {
     .boolean()
     .optional()
     .describe("Regenerate the transcript instead of returning a cached one."),
+};
+
+const getVideoMetadataInputSchema = {
+  ...uploadReferenceInputSchema,
 };
 
 const renderClipInputSchema = {
@@ -135,6 +156,33 @@ export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
     name: "clipforge-media",
     version: "0.1.0",
   });
+
+  server.registerTool(
+    "get_video_metadata",
+    {
+      annotations: {
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+        readOnlyHint: true,
+      },
+      description:
+        "Return technical metadata for the focused uploaded video, including duration, display dimensions, aspect ratio, frame rate, rotation, codecs, audio presence, file size, and MIME type. Use this before planning ranges or changing output dimensions.",
+      inputSchema: getVideoMetadataInputSchema,
+      title: "Get Video Metadata",
+    },
+    async ({ sessionId, uploadId }) => {
+      const result = await handlers.getVideoMetadata({
+        sessionId,
+        uploadId,
+      });
+
+      return jsonToolResult("Returned video metadata.", {
+        metadata: result.metadata,
+        ...uploadReferenceSummary(result),
+      });
+    },
+  );
 
   server.registerTool(
     "get_transcript",
