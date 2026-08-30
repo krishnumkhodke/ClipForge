@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+
+FROM node:22-bookworm-slim AS builder
+
+ENV OPENUI_TELEMETRY_DISABLED=1
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+RUN corepack enable
+
+WORKDIR /workspace
+COPY . .
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter api build
+RUN pnpm --filter api deploy --prod --legacy /output/api
+
+FROM node:22-bookworm-slim AS runner
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libnss3 \
+    libdbus-1-3 \
+    libatk1.0-0 \
+    libgbm-dev \
+    libasound2 \
+    libxrandr2 \
+    libxkbcommon-dev \
+    libxfixes3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libatk-bridge2.0-0 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libcups2 \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV HOST=0.0.0.0
+ENV MEDIA_DATA_DIR=/data
+ENV NODE_ENV=production
+ENV PORT=4000
+
+WORKDIR /app
+COPY --from=builder /output/api ./
+RUN node --input-type=module -e "import {ensureBrowser} from '@remotion/renderer'; await ensureBrowser();"
+RUN mkdir -p /data
+
+EXPOSE 4000
+VOLUME ["/data"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:' + process.env.PORT + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+
+CMD ["node", "dist/server.js"]

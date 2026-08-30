@@ -4,6 +4,7 @@
     "CLIPFORGE_API_BASE_URL",
     "FFMPEG_PATH",
     "FFPROBE_PATH",
+    "HOST",
     "MEDIA_ALLOWED_ORIGINS",
     "MEDIA_API_BASE_URL",
     "MEDIA_DATA_DIR",
@@ -13,6 +14,7 @@
     "NEXT_PUBLIC_CLIPFORGE_API_BASE_URL",
     "NEXT_PUBLIC_MEDIA_API_BASE_URL",
     "NEXT_PUBLIC_MEDIA_MAX_UPLOAD_BYTES",
+    "NEXT_PUBLIC_TRUEFORGE_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_TRANSCRIPTION_LANGUAGE",
     "OPENAI_TRANSCRIPTION_MODEL",
@@ -23,7 +25,12 @@
     "build": {
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
-      "outputs": [".next/**", "!.next/cache/**", "!.next/dev/**"]
+      "outputs": [
+        ".next/**",
+        "!.next/cache/**",
+        "!.next/dev/**",
+        "dist/**"
+      ]
     },
     "lint": {
       "dependsOn": ["^lint"]

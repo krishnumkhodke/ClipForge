@@ -79,6 +79,9 @@ export async function renderClipToFile({
 
   await renderMedia({
     codec: "h264",
+    chromiumOptions: {
+      enableMultiProcessOnLinux: true,
+    },
     composition,
     inputProps,
     logLevel: "warn",

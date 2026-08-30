@@ -59,6 +59,7 @@ const dataRoot = process.env.MEDIA_DATA_DIR
 const uploadRoot = join(dataRoot, "uploads");
 const sessionRoot = join(dataRoot, "sessions");
 const port = Number(process.env.PORT ?? 4000);
+const host = process.env.HOST?.trim() || "127.0.0.1";
 const internalMediaBaseUrl =
   process.env.MEDIA_INTERNAL_BASE_URL ?? `http://127.0.0.1:${port}`;
 const publicMediaBaseUrl = (
@@ -1287,7 +1288,9 @@ app.get("/uploads/:uploadId/renders/:renderId/file", async (request, reply) => {
   }
 });
 
-await app.listen({
-  host: "127.0.0.1",
-  port,
-});
+await Promise.all([
+  mkdir(uploadRoot, { recursive: true }),
+  mkdir(sessionRoot, { recursive: true }),
+]);
+
+await app.listen({ host, port });

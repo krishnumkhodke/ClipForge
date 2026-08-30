@@ -6,6 +6,8 @@ const appDir = dirname(fileURLToPath(import.meta.url));
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: "standalone",
+  outputFileTracingRoot: resolve(appDir, "../.."),
   turbopack: {
     root: resolve(appDir, "../.."),
   },

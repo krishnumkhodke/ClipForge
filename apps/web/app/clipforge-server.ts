@@ -8,6 +8,7 @@ import type {
 } from "@truefoundry/trueforge-ui";
 import { createTrueForgeAgentUIServer } from "@truefoundry/trueforge-ui/plugins/trueforge-agent-server-adapter";
 import { CLIPFORGE_TURN_TOOL_CONTEXT } from "./clipforge-agent";
+import { CLIPFORGE_MODEL_NAME } from "./clipforge-config";
 
 const TRUEFORGE_BASE_URL =
   process.env.NEXT_PUBLIC_TRUEFORGE_BASE_URL ?? "/trueforge";
@@ -270,6 +271,11 @@ export function createClipForgeServer(): AgentUIServer {
 
   const clipForgeServer: AgentUIServer = {
     ...trueForgeServer,
+    async getModels() {
+      const models = await trueForgeServer.getModels();
+
+      return models.filter((model) => model.name === CLIPFORGE_MODEL_NAME);
+    },
     async *createTurn(request) {
       const augmentedRequest = await addClipForgeContextToTurnRequest(request);
       const deliveredDurableEventIds = new Set<string>();

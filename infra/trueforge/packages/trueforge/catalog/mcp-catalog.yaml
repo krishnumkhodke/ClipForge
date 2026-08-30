@@ -3,6 +3,10 @@
 # PUT /api/v1/settings/mcp-servers bodies. Discovery-only — never executed against.
 mcp_servers:
   - type: remote
+    name: media_service
+    url: http://host.docker.internal:4000/mcp
+    description: Inspect, transcribe, and render the video focused in a ClipForge session.
+  - type: remote
     name: linear
     logo: https://assets.production.truefoundry.com/linear.svg
     url: https://mcp.linear.app/mcp

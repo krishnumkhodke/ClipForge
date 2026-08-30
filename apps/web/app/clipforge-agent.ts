@@ -2,6 +2,7 @@
 
 import type { AgentSpec } from "@truefoundry/trueforge-ui";
 import type { HarnessAgentSpec } from "@truefoundry/trueforge-ui/plugins/trueforge-agent-server-adapter";
+import { CLIPFORGE_MODEL_NAME } from "./clipforge-config";
 
 const CLIPFORGE_INSTRUCTIONS_MARKER = "[ClipForge tool contract]";
 const CLIPFORGE_MEDIA_SERVER_NAME = "media_service";
@@ -48,7 +49,7 @@ export const CLIPFORGE_DEFAULT_AGENT_SPEC: HarnessAgentSpec = {
       preload: true,
     },
   ],
-  model: { name: "openai-main/gpt-4.1" },
+  model: { name: CLIPFORGE_MODEL_NAME },
 };
 
 export function withClipForgeAgentConfiguration(
@@ -87,5 +88,6 @@ export function withClipForgeAgentConfiguration(
       ? `${instructionsBeforeClipForge}\n\n${CLIPFORGE_AGENT_INSTRUCTIONS}`
       : CLIPFORGE_AGENT_INSTRUCTIONS,
     mcpServers,
+    model: { ...base.model, name: CLIPFORGE_MODEL_NAME },
   };
 }
