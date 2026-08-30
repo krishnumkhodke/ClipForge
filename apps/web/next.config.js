@@ -12,10 +12,6 @@ const nextConfig = {
   async rewrites() {
     return [
       {
-        source: "/trueforge/:path*",
-        destination: `${process.env.TRUEFORGE_BASE_URL ?? "http://127.0.0.1:8790"}/:path*`,
-      },
-      {
         source: "/clipforge-api/:path*",
         destination: `${
           process.env.MEDIA_API_BASE_URL ??

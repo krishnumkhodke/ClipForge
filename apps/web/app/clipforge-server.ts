@@ -185,17 +185,21 @@ function getEventId(item: TurnStreamData) {
 }
 
 async function waitForPersistedEvents(abortSignal?: AbortSignal) {
-  await new Promise<void>((resolve, reject) => {
-    const timeoutId = window.setTimeout(resolve, 500);
+  if (abortSignal?.aborted) {
+    throw abortSignal.reason;
+  }
 
-    abortSignal?.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timeoutId);
-        reject(abortSignal.reason);
-      },
-      { once: true },
-    );
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      window.clearTimeout(timeoutId);
+      reject(abortSignal?.reason);
+    };
+    const timeoutId = window.setTimeout(() => {
+      abortSignal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, 750);
+
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -214,26 +218,36 @@ async function* replayPersistedTurnEvents({
   sessionId: string;
   turnId: string;
 }): AsyncIterable<TurnStreamData> {
-  await waitForPersistedEvents(abortSignal);
-
-  const events = await server.listEvents({
-    lastTurnId: turnId,
-    limit: 100,
-    sessionId,
-  });
   let sequenceNumber = lastSequenceNumber ?? 0;
 
-  for (const item of [...events.data].reverse()) {
-    if (item.turnId !== turnId || deliveredEventIds.has(item.event.id)) {
-      continue;
+  while (!abortSignal?.aborted) {
+    await waitForPersistedEvents(abortSignal);
+
+    const events = await server.listEvents({
+      lastTurnId: turnId,
+      limit: 100,
+      sessionId,
+    });
+    let sawTurnDone = false;
+
+    for (const item of [...events.data].reverse()) {
+      if (item.turnId !== turnId || deliveredEventIds.has(item.event.id)) {
+        continue;
+      }
+
+      deliveredEventIds.add(item.event.id);
+      sequenceNumber += 1;
+      sawTurnDone = sawTurnDone || item.event.type === "turn.done";
+
+      yield {
+        event: item.event,
+        sequenceNumber,
+      };
     }
 
-    sequenceNumber += 1;
-
-    yield {
-      event: item.event,
-      sequenceNumber,
-    };
+    if (sawTurnDone) {
+      return;
+    }
   }
 }
 
@@ -250,6 +264,7 @@ export function createClipForgeServer(): AgentUIServer {
       let lastSequenceNumber: number | undefined;
       let turnId: string | undefined;
       let sawTurnDone = false;
+      let streamError: unknown;
 
       try {
         for await (const item of trueForgeServer.createTurn(augmentedRequest)) {
@@ -263,39 +278,52 @@ export function createClipForgeServer(): AgentUIServer {
           yield redactClipForgeContext(item);
         }
       } catch (error) {
-        if (sawTurnDone || request.abortSignal?.aborted) {
-          return;
-        }
+        streamError = error;
+      }
 
-        if (!turnId || !trueForgeServer.subscribeToTurn) {
-          throw error;
-        }
+      if (sawTurnDone || request.abortSignal?.aborted) {
+        return;
+      }
 
-        try {
-          for await (const item of trueForgeServer.subscribeToTurn({
-            abortSignal: request.abortSignal,
-            afterSequenceNumber: lastSequenceNumber,
-            sessionId: request.sessionId,
-            turnId,
-          })) {
-            const eventId = getEventId(item);
-            if (eventId) {
-              deliveredEventIds.add(eventId);
-            }
-            yield redactClipForgeContext(item);
+      if (!turnId || !trueForgeServer.subscribeToTurn) {
+        throw (
+          streamError ??
+          new Error("Turn stream ended before turn.done was received.")
+        );
+      }
+
+      try {
+        for await (const item of trueForgeServer.subscribeToTurn({
+          abortSignal: request.abortSignal,
+          afterSequenceNumber: lastSequenceNumber,
+          sessionId: request.sessionId,
+          turnId,
+        })) {
+          const eventId = getEventId(item);
+          if (eventId) {
+            deliveredEventIds.add(eventId);
           }
-        } catch {
-          for await (const item of replayPersistedTurnEvents({
-            abortSignal: request.abortSignal,
-            deliveredEventIds,
-            lastSequenceNumber,
-            server: trueForgeServer,
-            sessionId: request.sessionId,
-            turnId,
-          })) {
-            yield redactClipForgeContext(item);
-          }
+          lastSequenceNumber = item.sequenceNumber;
+          sawTurnDone = sawTurnDone || item.event.type === "turn.done";
+          yield redactClipForgeContext(item);
         }
+      } catch {
+        // The durable event log below is the final recovery path.
+      }
+
+      if (sawTurnDone || request.abortSignal?.aborted) {
+        return;
+      }
+
+      for await (const item of replayPersistedTurnEvents({
+        abortSignal: request.abortSignal,
+        deliveredEventIds,
+        lastSequenceNumber,
+        server: trueForgeServer,
+        sessionId: request.sessionId,
+        turnId,
+      })) {
+        yield redactClipForgeContext(item);
       }
     },
     async getTurn(request) {
