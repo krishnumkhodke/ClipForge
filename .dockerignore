@@ -12,7 +12,3 @@
 coverage
 npm-debug.log*
 pnpm-debug.log*
-
-infra/trueforge/**
-!infra/trueforge/scripts/
-!infra/trueforge/scripts/bootstrap-clipforge.mjs
