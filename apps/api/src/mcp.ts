@@ -54,7 +54,7 @@ const uploadReferenceInputSchema = {
     .pipe(storageIdSchema)
     .optional()
     .describe(
-      "The TrueForge session id. Prefer this so ClipForge can use the session's focused video.",
+      "The TrueForge session id for the chat. Use this by default so ClipForge operates on the session's focused video.",
     ),
   uploadId: z
     .string()
@@ -76,7 +76,7 @@ const getTranscriptInputSchema = {
 const renderClipInputSchema = {
   ...uploadReferenceInputSchema,
   clip: renderClipRequestSchema.shape.clip.describe(
-    "Optional clip render plan. Omit to render a short smoke-test clip.",
+    "Clip render plan. Supported fields are id, title, startSeconds, endSeconds, optional captions, and optional output width, height, and fps. Unsupported today: caption style, font, color, crop mode, transitions, music, B-roll, thumbnails, and multi-clip sequences.",
   ),
 };
 
@@ -140,7 +140,7 @@ export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
         readOnlyHint: true,
       },
       description:
-        "Return a timestamped transcript and caption segments for an uploaded video.",
+        "Return a timestamped transcript and caption segments for the focused uploaded video. Prefer sessionId over uploadId in normal chat use.",
       inputSchema: getTranscriptInputSchema,
       title: "Get Transcript",
     },
@@ -172,7 +172,7 @@ export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
         readOnlyHint: false,
       },
       description:
-        "Render an uploaded video segment into a vertical MP4 using a ClipForge clip JSON shape.",
+        "Render one uploaded video segment into an MP4 using ClipForge's current fixed template. This tool can choose timing, title, captions, width, height, and fps only; it cannot customize subtitle styling, fonts, colors, crop strategy, transitions, music, B-roll, thumbnails, or multi-clip sequences.",
       inputSchema: renderClipInputSchema,
       title: "Render Clip",
     },

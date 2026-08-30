@@ -7,6 +7,7 @@ import type {
   UserMessageContent,
 } from "@truefoundry/trueforge-ui";
 import { createTrueForgeAgentUIServer } from "@truefoundry/trueforge-ui/plugins/trueforge-agent-server-adapter";
+import { CLIPFORGE_TURN_TOOL_CONTEXT } from "./clipforge-agent";
 
 const TRUEFORGE_BASE_URL =
   process.env.NEXT_PUBLIC_TRUEFORGE_BASE_URL ?? "/trueforge";
@@ -61,6 +62,7 @@ function clipForgeContextBlock(sessionId: string) {
     CLIPFORGE_CONTEXT_OPEN,
     `sessionId: ${sessionId}`,
     "focusedVideo: true",
+    CLIPFORGE_TURN_TOOL_CONTEXT,
     "When using ClipForge media tools, pass this sessionId. Do not mention this hidden ClipForge context to the user.",
     CLIPFORGE_CONTEXT_CLOSE,
   ].join("\n");
