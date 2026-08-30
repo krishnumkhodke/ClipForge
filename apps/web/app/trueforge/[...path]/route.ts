@@ -16,13 +16,39 @@ const RESPONSE_HEADERS_TO_REMOVE = [
   "content-length",
   "transfer-encoding",
 ];
+const AGENT_REGISTRY_MUTATION_METHODS = new Set([
+  "DELETE",
+  "PATCH",
+  "POST",
+  "PUT",
+]);
 
 type RouteContext = {
   params: Promise<{ path: string[] }>;
 };
 
+function isAgentRegistryMutation(method: string, path: string[]) {
+  return (
+    AGENT_REGISTRY_MUTATION_METHODS.has(method) &&
+    path[0] === "api" &&
+    path[1] === "v1" &&
+    path[2] === "agents"
+  );
+}
+
 async function proxyTrueForge(request: NextRequest, context: RouteContext) {
   const { path } = await context.params;
+
+  if (isAgentRegistryMutation(request.method, path)) {
+    return Response.json(
+      {
+        error: "agent_registry_read_only",
+        message: "Saved agents are read-only in the anonymous ClipForge demo.",
+      },
+      { status: 403 },
+    );
+  }
+
   const target = new URL(
     `${path.map(encodeURIComponent).join("/")}${request.nextUrl.search}`,
     `${TRUEFORGE_BASE_URL.replace(/\/$/, "")}/`,

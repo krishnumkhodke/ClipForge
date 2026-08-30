@@ -11,11 +11,16 @@ import { CLIPFORGE_DEFAULT_AGENT_SPEC } from "./clipforge-agent";
 import { ClipForgeMarkdown } from "./clipforge-markdown";
 import { ClipForgeToolCallContentBlock } from "./clipforge-tool-response";
 
+function ReadOnlySaveAgentButton() {
+  return <></>;
+}
+
 export function TrueForgeChat() {
   const server = useMemo(() => createClipForgeServer(), []);
   const overrides = useMemo<SlotOverrides>(
     () => ({
       Markdown: ClipForgeMarkdown,
+      SaveAgentButton: ReadOnlySaveAgentButton,
       ThreadRootShell: ClipForgeThreadRootShell,
       ToolCallContentBlock: ClipForgeToolCallContentBlock,
     }),
