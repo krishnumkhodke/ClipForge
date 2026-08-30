@@ -22,6 +22,10 @@ import {
   useAuiState,
   type ThreadRootShellProps,
 } from "@truefoundry/trueforge-ui";
+import {
+  CLIPFORGE_DEFAULT_AGENT_SPEC,
+  withClipForgeAgentInstructions,
+} from "./clipforge-agent";
 
 type FocusedVideo = {
   aspectRatio: number | null;
@@ -61,7 +65,10 @@ type FocusedVideoContextValue = {
     threadKey: string,
     uploadAttempt: number,
   ) => boolean;
-  migrateThreadUploadState: (fromThreadKey: string, toThreadKey: string) => void;
+  migrateThreadUploadState: (
+    fromThreadKey: string,
+    toThreadKey: string,
+  ) => void;
   updateThreadUploadState: (
     threadKey: string,
     update: (current: ThreadUploadState) => ThreadUploadState,
@@ -98,8 +105,6 @@ const MEDIA_API_BASE_URL =
   process.env.NEXT_PUBLIC_MEDIA_API_BASE_URL ??
   process.env.NEXT_PUBLIC_CLIPFORGE_API_BASE_URL ??
   "http://127.0.0.1:4000";
-const DEFAULT_AGENT_SPEC = { model: { name: "openai-main/gpt-4.1" } };
-
 const FocusedVideoContext = createContext<FocusedVideoContextValue | null>(
   null,
 );
@@ -382,9 +387,7 @@ function ClipForgeFocusedVideoPanel({
         { signal: abortController.signal },
       );
       const body = (await response.json().catch(() => null)) as
-        | SessionUploadsResponse
-        | { message?: string }
-        | null;
+        SessionUploadsResponse | { message?: string } | null;
 
       if (!response.ok) {
         throw new Error(
@@ -482,12 +485,12 @@ function ClipForgeFocusedVideoPanel({
     createSessionPromiseRef.current = (async () => {
       const createdSession = activeMode.isMutable
         ? await server.createSession({
-            agentSpec: activeMode.agentSpec ?? DEFAULT_AGENT_SPEC,
+            agentSpec: withClipForgeAgentInstructions(activeMode.agentSpec),
           })
         : await server.createSession(
-            activeMode.agentName ?? activeMode.agentId
+            (activeMode.agentName ?? activeMode.agentId)
               ? { agentName: activeMode.agentName ?? activeMode.agentId }
-              : { agentSpec: DEFAULT_AGENT_SPEC },
+              : { agentSpec: CLIPFORGE_DEFAULT_AGENT_SPEC },
           );
 
       migrateThreadUploadState(localThreadId, createdSession.id);
@@ -507,20 +510,10 @@ function ClipForgeFocusedVideoPanel({
     } finally {
       createSessionPromiseRef.current = null;
     }
-  }, [
-    localThreadId,
-    migrateThreadUploadState,
-    remoteSessionId,
-    server,
-    shell,
-  ]);
+  }, [localThreadId, migrateThreadUploadState, remoteSessionId, server, shell]);
 
   const uploadVideoToMediaService = useCallback(
-    async (
-      file: File,
-      uploadThreadKey: string,
-      uploadAttempt: number,
-    ) => {
+    async (file: File, uploadThreadKey: string, uploadAttempt: number) => {
       const formData = new FormData();
       formData.append("video", file);
       let uploadStateKey = uploadThreadKey;
@@ -541,9 +534,7 @@ function ClipForgeFocusedVideoPanel({
           },
         );
         const body = (await response.json().catch(() => null)) as
-          | MediaUploadResponse
-          | { message?: string }
-          | null;
+          MediaUploadResponse | { message?: string } | null;
 
         if (!response.ok) {
           throw new Error(
@@ -705,11 +696,7 @@ function ClipForgeFocusedVideoPanel({
     (event: SyntheticEvent<HTMLVideoElement>) => {
       const video = event.currentTarget;
 
-      if (
-        !focusedVideoUrl ||
-        video.videoWidth <= 0 ||
-        video.videoHeight <= 0
-      ) {
+      if (!focusedVideoUrl || video.videoWidth <= 0 || video.videoHeight <= 0) {
         return;
       }
 
@@ -793,8 +780,7 @@ function ClipForgeFocusedVideoPanel({
               {threadUpload.uploadStatus === "uploading"
                 ? "Uploading..."
                 : null}
-              {threadUpload.uploadStatus === "uploaded" &&
-              focusedVideo.uploadId
+              {threadUpload.uploadStatus === "uploaded" && focusedVideo.uploadId
                 ? `Saved ${focusedVideo.uploadId}`
                 : null}
               {threadUpload.uploadStatus === "failed" ? "Upload failed" : null}
@@ -836,14 +822,10 @@ export const ClipForgeThreadRootShell = forwardRef<
   ThreadRootShellProps
 >(function ClipForgeThreadRootShell({ children, className, ...props }, ref) {
   const localThreadId = useAuiState((state) => state.threadListItem.id);
-  const remoteSessionId = useAuiState(
-    (state) => state.threadListItem.remoteId,
-  );
+  const remoteSessionId = useAuiState((state) => state.threadListItem.remoteId);
   const threadKey = remoteSessionId ?? localThreadId;
-  const {
-    getThreadUploadState,
-    migrateThreadUploadState,
-  } = useFocusedVideoContext();
+  const { getThreadUploadState, migrateThreadUploadState } =
+    useFocusedVideoContext();
 
   useEffect(() => {
     if (remoteSessionId && remoteSessionId !== localThreadId) {

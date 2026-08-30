@@ -15,6 +15,10 @@ const clipOutputSchema = z.object({
   height: z.number().int().positive().default(1920),
   width: z.number().int().positive().default(1080),
 });
+const clipCaptionsInputSchema = z.union([
+  z.array(clipCaptionSchema),
+  z.boolean(),
+]);
 
 const clipRenderPlanBaseSchema = z.object({
   captions: z.array(clipCaptionSchema).default([]),
@@ -37,7 +41,7 @@ export const clipRenderPlanSchema = clipRenderPlanBaseSchema.refine(
 export const renderClipRequestSchema = z.object({
   clip: z
     .object({
-      captions: z.array(clipCaptionSchema).optional(),
+      captions: clipCaptionsInputSchema.optional(),
       endSeconds: z.number().positive().optional(),
       id: z.string().min(1).optional(),
       output: clipOutputSchema.partial().optional(),
@@ -50,7 +54,11 @@ export const renderClipRequestSchema = z.object({
 
 export type ClipCaption = z.infer<typeof clipCaptionSchema>;
 export type ClipRenderPlan = z.infer<typeof clipRenderPlanSchema>;
-export type ClipRenderPlanInput = Omit<Partial<ClipRenderPlan>, "output"> & {
+export type ClipRenderPlanInput = Omit<
+  Partial<ClipRenderPlan>,
+  "captions" | "output"
+> & {
+  captions?: z.infer<typeof clipCaptionsInputSchema>;
   output?: Partial<ClipRenderPlan["output"]>;
 };
 
@@ -120,6 +128,23 @@ function normalizeClipCaptions(
     }));
 }
 
+function resolveClipCaptions(
+  captions: ClipRenderPlanInput["captions"] | undefined,
+  transcript: Transcript | undefined,
+  startSeconds: number,
+  endSeconds: number,
+) {
+  if (captions === false) {
+    return [];
+  }
+
+  if (captions === true || captions === undefined) {
+    return captionsForClip(transcript, startSeconds, endSeconds);
+  }
+
+  return normalizeClipCaptions(captions, startSeconds, endSeconds);
+}
+
 export function buildDummyClipRenderPlan(
   uploadId: string,
   transcript?: Transcript,
@@ -154,9 +179,12 @@ export function mergeClipRenderPlan(
   return clipRenderPlanSchema.parse({
     ...fallback,
     ...clip,
-    captions: clip?.captions
-      ? normalizeClipCaptions(clip.captions, startSeconds, endSeconds)
-      : captionsForClip(transcript, startSeconds, endSeconds),
+    captions: resolveClipCaptions(
+      clip?.captions,
+      transcript,
+      startSeconds,
+      endSeconds,
+    ),
     endSeconds,
     output: {
       ...fallback.output,

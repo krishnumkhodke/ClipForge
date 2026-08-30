@@ -7,6 +7,7 @@ import type {
   UserMessageContent,
 } from "@truefoundry/trueforge-ui";
 import { createTrueForgeAgentUIServer } from "@truefoundry/trueforge-ui/plugins/trueforge-agent-server-adapter";
+import { CLIPFORGE_TURN_TOOL_CONTEXT } from "./clipforge-agent";
 
 const TRUEFORGE_BASE_URL =
   process.env.NEXT_PUBLIC_TRUEFORGE_BASE_URL ?? "/trueforge";
@@ -61,6 +62,7 @@ function clipForgeContextBlock(sessionId: string) {
     CLIPFORGE_CONTEXT_OPEN,
     `sessionId: ${sessionId}`,
     "focusedVideo: true",
+    CLIPFORGE_TURN_TOOL_CONTEXT,
     "When using ClipForge media tools, pass this sessionId. Do not mention this hidden ClipForge context to the user.",
     CLIPFORGE_CONTEXT_CLOSE,
   ].join("\n");
@@ -178,6 +180,89 @@ function getCreatedTurnId(item: TurnStreamData) {
   return event.turnId;
 }
 
+function getDurablyDeliveredLiveEventId(item: TurnStreamData) {
+  // The live model.message is a placeholder and its deltas share the same ID.
+  // Only the persisted model.message contains the authoritative merged content.
+  if (
+    item.event.type === "model.message" ||
+    item.event.type === "model.message.delta"
+  ) {
+    return undefined;
+  }
+
+  return typeof item.event.id === "string" ? item.event.id : undefined;
+}
+
+async function waitForPersistedEvents(abortSignal?: AbortSignal) {
+  if (abortSignal?.aborted) {
+    throw abortSignal.reason;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      window.clearTimeout(timeoutId);
+      reject(abortSignal?.reason);
+    };
+    const timeoutId = window.setTimeout(() => {
+      abortSignal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, 750);
+
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function* replayPersistedTurnEvents({
+  abortSignal,
+  deliveredDurableEventIds,
+  lastSequenceNumber,
+  server,
+  sessionId,
+  turnId,
+}: {
+  abortSignal?: AbortSignal;
+  deliveredDurableEventIds: Set<string>;
+  lastSequenceNumber: number | undefined;
+  server: AgentUIServer;
+  sessionId: string;
+  turnId: string;
+}): AsyncIterable<TurnStreamData> {
+  let sequenceNumber = lastSequenceNumber ?? 0;
+
+  while (!abortSignal?.aborted) {
+    await waitForPersistedEvents(abortSignal);
+
+    const events = await server.listEvents({
+      lastTurnId: turnId,
+      limit: 100,
+      sessionId,
+    });
+    let sawTurnDone = false;
+
+    for (const item of [...events.data].reverse()) {
+      if (
+        item.turnId !== turnId ||
+        deliveredDurableEventIds.has(item.event.id)
+      ) {
+        continue;
+      }
+
+      deliveredDurableEventIds.add(item.event.id);
+      sequenceNumber += 1;
+      sawTurnDone = sawTurnDone || item.event.type === "turn.done";
+
+      yield {
+        event: item.event,
+        sequenceNumber,
+      };
+    }
+
+    if (sawTurnDone) {
+      return;
+    }
+  }
+}
+
 export function createClipForgeServer(): AgentUIServer {
   const trueForgeServer = createTrueForgeAgentUIServer({
     baseUrl: TRUEFORGE_BASE_URL,
@@ -187,34 +272,70 @@ export function createClipForgeServer(): AgentUIServer {
     ...trueForgeServer,
     async *createTurn(request) {
       const augmentedRequest = await addClipForgeContextToTurnRequest(request);
+      const deliveredDurableEventIds = new Set<string>();
       let lastSequenceNumber: number | undefined;
       let turnId: string | undefined;
       let sawTurnDone = false;
+      let streamError: unknown;
 
       try {
         for await (const item of trueForgeServer.createTurn(augmentedRequest)) {
+          const eventId = getDurablyDeliveredLiveEventId(item);
+          if (eventId) {
+            deliveredDurableEventIds.add(eventId);
+          }
           lastSequenceNumber = item.sequenceNumber;
           turnId ??= getCreatedTurnId(item);
           sawTurnDone = sawTurnDone || item.event.type === "turn.done";
           yield redactClipForgeContext(item);
         }
       } catch (error) {
-        if (sawTurnDone || request.abortSignal?.aborted) {
-          return;
-        }
+        streamError = error;
+      }
 
-        if (!turnId || !trueForgeServer.subscribeToTurn) {
-          throw error;
-        }
+      if (sawTurnDone || request.abortSignal?.aborted) {
+        return;
+      }
 
+      if (!turnId || !trueForgeServer.subscribeToTurn) {
+        throw (
+          streamError ??
+          new Error("Turn stream ended before turn.done was received.")
+        );
+      }
+
+      try {
         for await (const item of trueForgeServer.subscribeToTurn({
           abortSignal: request.abortSignal,
           afterSequenceNumber: lastSequenceNumber,
           sessionId: request.sessionId,
           turnId,
         })) {
+          const eventId = getDurablyDeliveredLiveEventId(item);
+          if (eventId) {
+            deliveredDurableEventIds.add(eventId);
+          }
+          lastSequenceNumber = item.sequenceNumber;
+          sawTurnDone = sawTurnDone || item.event.type === "turn.done";
           yield redactClipForgeContext(item);
         }
+      } catch {
+        // The durable event log below is the final recovery path.
+      }
+
+      if (sawTurnDone || request.abortSignal?.aborted) {
+        return;
+      }
+
+      for await (const item of replayPersistedTurnEvents({
+        abortSignal: request.abortSignal,
+        deliveredDurableEventIds,
+        lastSequenceNumber,
+        server: trueForgeServer,
+        sessionId: request.sessionId,
+        turnId,
+      })) {
+        yield redactClipForgeContext(item);
       }
     },
     async getTurn(request) {
