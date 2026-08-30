@@ -2,6 +2,9 @@ import { z } from "zod";
 import { storageIdSchema } from "./storage-id.js";
 import type { Transcript } from "./transcription.js";
 
+const MAX_CLIP_SEGMENTS = 8;
+const DEFAULT_CARD_DURATION_SECONDS = 0.8;
+
 export const clipCaptionSchema = z.object({
   confidence: z.number().nullable().optional(),
   endMs: z.number().int().nonnegative(),
@@ -20,129 +23,284 @@ const clipCaptionsInputSchema = z.union([
   z.boolean(),
 ]);
 
-const clipRenderPlanBaseSchema = z.object({
-  captions: z.array(clipCaptionSchema).default([]),
-  endSeconds: z.number().positive(),
-  id: z.string().min(1).default("dummy-clip"),
-  output: clipOutputSchema.default({ fps: 30, height: 1920, width: 1080 }),
-  startSeconds: z.number().nonnegative().default(0),
-  title: z.string().min(1).default("ClipForge dummy clip"),
-  uploadId: storageIdSchema,
+const cutTransitionSchema = z.object({
+  kind: z.literal("cut"),
+});
+const chapterCardTransitionSchema = z.object({
+  durationSeconds: z
+    .number()
+    .min(0.25)
+    .max(3)
+    .default(DEFAULT_CARD_DURATION_SECONDS),
+  kind: z.literal("card"),
+  preset: z.literal("chapter").default("chapter"),
+  title: z.string().trim().min(1).max(120).optional(),
 });
 
-export const clipRenderPlanSchema = clipRenderPlanBaseSchema.refine(
-  (clip) => clip.endSeconds > clip.startSeconds,
-  {
+export const clipTransitionSchema = z.discriminatedUnion("kind", [
+  cutTransitionSchema,
+  chapterCardTransitionSchema,
+]);
+
+const clipSegmentFields = {
+  endSeconds: z.number().positive(),
+  startSeconds: z.number().nonnegative(),
+  transitionAfter: clipTransitionSchema.optional(),
+};
+
+export const clipSegmentSchema = z
+  .object({
+    ...clipSegmentFields,
+    id: z.string().trim().min(1).max(80),
+  })
+  .refine((segment) => segment.endSeconds > segment.startSeconds, {
     message: "endSeconds must be greater than startSeconds.",
     path: ["endSeconds"],
-  },
-);
+  });
+
+const clipSegmentInputSchema = z
+  .object({
+    ...clipSegmentFields,
+    id: z.string().trim().min(1).max(80).optional(),
+  })
+  .refine((segment) => segment.endSeconds > segment.startSeconds, {
+    message: "endSeconds must be greater than startSeconds.",
+    path: ["endSeconds"],
+  });
+
+function validateLastSegmentTransition(
+  segments: Array<{ transitionAfter?: z.infer<typeof clipTransitionSchema> }>,
+  context: z.core.$RefinementCtx,
+) {
+  const lastTransition = segments.at(-1)?.transitionAfter;
+
+  if (lastTransition?.kind === "card") {
+    context.addIssue({
+      code: "custom",
+      message: "The last segment cannot have a card transition after it.",
+      path: ["segments", segments.length - 1, "transitionAfter"],
+    });
+  }
+}
+
+export const clipRenderPlanSchema = z
+  .object({
+    captions: z.array(clipCaptionSchema).default([]),
+    id: z.string().min(1).default("dummy-clip"),
+    output: clipOutputSchema.default({ fps: 30, height: 1920, width: 1080 }),
+    schemaVersion: z.literal(2).default(2),
+    segments: z.array(clipSegmentSchema).min(1).max(MAX_CLIP_SEGMENTS),
+    title: z.string().min(1).default("ClipForge dummy clip"),
+    uploadId: storageIdSchema,
+  })
+  .superRefine((clip, context) =>
+    validateLastSegmentTransition(clip.segments, context),
+  );
+
+const clipRenderInputSchema = z
+  .object({
+    captions: clipCaptionsInputSchema.optional(),
+    endSeconds: z.number().positive().optional(),
+    id: z.string().min(1).optional(),
+    output: clipOutputSchema.partial().optional(),
+    schemaVersion: z.literal(2).optional(),
+    segments: z
+      .array(clipSegmentInputSchema)
+      .min(1)
+      .max(MAX_CLIP_SEGMENTS)
+      .optional(),
+    startSeconds: z.number().nonnegative().optional(),
+    title: z.string().min(1).optional(),
+    uploadId: storageIdSchema.optional(),
+  })
+  .superRefine((clip, context) => {
+    if (
+      clip.segments &&
+      (clip.startSeconds !== undefined || clip.endSeconds !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Use either segments or startSeconds/endSeconds, not both in the same clip.",
+        path: ["segments"],
+      });
+    }
+
+    if (clip.segments) {
+      validateLastSegmentTransition(clip.segments, context);
+    }
+  });
 
 export const renderClipRequestSchema = z.object({
-  clip: z
-    .object({
-      captions: clipCaptionsInputSchema.optional(),
-      endSeconds: z.number().positive().optional(),
-      id: z.string().min(1).optional(),
-      output: clipOutputSchema.partial().optional(),
-      startSeconds: z.number().nonnegative().optional(),
-      title: z.string().min(1).optional(),
-      uploadId: storageIdSchema.optional(),
-    })
-    .optional(),
+  clip: clipRenderInputSchema.optional(),
 });
 
 export type ClipCaption = z.infer<typeof clipCaptionSchema>;
+export type ClipTransition = z.infer<typeof clipTransitionSchema>;
+export type ClipSegment = z.infer<typeof clipSegmentSchema>;
 export type ClipRenderPlan = z.infer<typeof clipRenderPlanSchema>;
-export type ClipRenderPlanInput = Omit<
-  Partial<ClipRenderPlan>,
-  "captions" | "output"
-> & {
-  captions?: z.infer<typeof clipCaptionsInputSchema>;
-  output?: Partial<ClipRenderPlan["output"]>;
-};
+export type ClipRenderPlanInput = z.infer<typeof clipRenderInputSchema>;
+
+export function clipSegmentDurationInFrames(segment: ClipSegment, fps: number) {
+  return Math.max(
+    1,
+    Math.round((segment.endSeconds - segment.startSeconds) * fps),
+  );
+}
+
+export function clipTransitionDurationInFrames(
+  transition: ClipTransition | undefined,
+  fps: number,
+) {
+  return transition?.kind === "card"
+    ? Math.max(1, Math.round(transition.durationSeconds * fps))
+    : 0;
+}
+
+export function clipDurationInFrames(clip: ClipRenderPlan) {
+  return clip.segments.reduce(
+    (duration, segment) =>
+      duration +
+      clipSegmentDurationInFrames(segment, clip.output.fps) +
+      clipTransitionDurationInFrames(segment.transitionAfter, clip.output.fps),
+    0,
+  );
+}
+
+export function clipDurationSeconds(clip: ClipRenderPlan) {
+  return clipDurationInFrames(clip) / clip.output.fps;
+}
+
+function mapCaptionsFromSourceTimeline(
+  captions: ClipCaption[],
+  segments: ClipSegment[],
+  fps: number,
+) {
+  const mapped: ClipCaption[] = [];
+  let outputOffsetMs = 0;
+
+  for (const segment of segments) {
+    const sourceStartMs = Math.round(segment.startSeconds * 1000);
+    const sourceEndMs = Math.round(segment.endSeconds * 1000);
+
+    for (const caption of captions) {
+      if (caption.endMs <= sourceStartMs || caption.startMs >= sourceEndMs) {
+        continue;
+      }
+
+      const clippedStartMs = Math.max(caption.startMs, sourceStartMs);
+      const clippedEndMs = Math.min(caption.endMs, sourceEndMs);
+      const timestampMs = caption.timestampMs ?? caption.startMs;
+
+      mapped.push({
+        confidence: caption.confidence,
+        endMs: outputOffsetMs + clippedEndMs - sourceStartMs,
+        startMs: outputOffsetMs + clippedStartMs - sourceStartMs,
+        text: caption.text,
+        timestampMs:
+          caption.timestampMs === null
+            ? null
+            : outputOffsetMs +
+              Math.min(Math.max(timestampMs, sourceStartMs), sourceEndMs) -
+              sourceStartMs,
+      });
+    }
+
+    outputOffsetMs += Math.round(
+      (clipSegmentDurationInFrames(segment, fps) / fps) * 1000,
+    );
+    outputOffsetMs += Math.round(
+      (clipTransitionDurationInFrames(segment.transitionAfter, fps) / fps) *
+        1000,
+    );
+  }
+
+  return mapped;
+}
 
 function captionsForClip(
   transcript: Transcript | undefined,
-  startSeconds: number,
-  endSeconds: number,
+  segments: ClipSegment[],
+  fps: number,
 ) {
   if (!transcript) {
     return [];
   }
 
-  const startMs = Math.round(startSeconds * 1000);
-  const endMs = Math.round(endSeconds * 1000);
-
-  return transcript.captions
-    .filter((caption) => caption.endMs > startMs && caption.startMs < endMs)
-    .map((caption) => ({
-      confidence: caption.confidence,
-      endMs: Math.min(caption.endMs, endMs) - startMs,
-      startMs: Math.max(caption.startMs, startMs) - startMs,
-      text: caption.text,
-      timestampMs:
-        caption.timestampMs === null
-          ? null
-          : Math.max(caption.timestampMs ?? caption.startMs, startMs) - startMs,
-    }));
+  return mapCaptionsFromSourceTimeline(transcript.captions, segments, fps);
 }
 
 function normalizeClipCaptions(
   captions: ClipCaption[],
-  startSeconds: number,
-  endSeconds: number,
+  segments: ClipSegment[],
+  fps: number,
 ) {
   if (captions.length === 0) {
     return captions;
   }
 
-  const clipStartMs = Math.round(startSeconds * 1000);
-  const clipEndMs = Math.round(endSeconds * 1000);
-  const clipDurationMs = clipEndMs - clipStartMs;
-  const maxCaptionEndMs = Math.max(...captions.map((caption) => caption.endMs));
-  const alreadyRelative = maxCaptionEndMs <= clipDurationMs;
-  const overlapsAbsoluteClipRange = captions.some(
-    (caption) => caption.endMs > clipStartMs && caption.startMs < clipEndMs,
+  const outputDurationMs = Math.round(
+    (segments.reduce(
+      (duration, segment) =>
+        duration +
+        clipSegmentDurationInFrames(segment, fps) +
+        clipTransitionDurationInFrames(segment.transitionAfter, fps),
+      0,
+    ) /
+      fps) *
+      1000,
   );
+  const maxCaptionEndMs = Math.max(...captions.map((caption) => caption.endMs));
 
-  if (alreadyRelative || !overlapsAbsoluteClipRange) {
+  if (maxCaptionEndMs <= outputDurationMs + 1000 / fps) {
     return captions;
   }
 
-  return captions
-    .filter(
-      (caption) => caption.endMs > clipStartMs && caption.startMs < clipEndMs,
-    )
-    .map((caption) => ({
-      ...caption,
-      endMs: Math.min(caption.endMs, clipEndMs) - clipStartMs,
-      startMs: Math.max(caption.startMs, clipStartMs) - clipStartMs,
-      timestampMs:
-        caption.timestampMs === null
-          ? null
-          : Math.min(
-              Math.max(caption.timestampMs ?? caption.startMs, clipStartMs),
-              clipEndMs,
-            ) - clipStartMs,
-    }));
+  return mapCaptionsFromSourceTimeline(captions, segments, fps);
 }
 
 function resolveClipCaptions(
   captions: ClipRenderPlanInput["captions"] | undefined,
   transcript: Transcript | undefined,
-  startSeconds: number,
-  endSeconds: number,
+  segments: ClipSegment[],
+  fps: number,
 ) {
   if (captions === false) {
     return [];
   }
 
   if (captions === true || captions === undefined) {
-    return captionsForClip(transcript, startSeconds, endSeconds);
+    return captionsForClip(transcript, segments, fps);
   }
 
-  return normalizeClipCaptions(captions, startSeconds, endSeconds);
+  return normalizeClipCaptions(captions, segments, fps);
+}
+
+function normalizeSegments(
+  clip: ClipRenderPlanInput | undefined,
+  fallback: ClipRenderPlan,
+): ClipSegment[] {
+  if (clip?.segments) {
+    return clip.segments.map((segment, index) =>
+      clipSegmentSchema.parse({
+        ...segment,
+        id: segment.id ?? `segment-${index + 1}`,
+      }),
+    );
+  }
+
+  const fallbackSegment = fallback.segments[0];
+  if (!fallbackSegment) {
+    throw new Error("The fallback clip must contain one segment.");
+  }
+
+  return [
+    clipSegmentSchema.parse({
+      ...fallbackSegment,
+      endSeconds: clip?.endSeconds ?? fallbackSegment.endSeconds,
+      startSeconds: clip?.startSeconds ?? fallbackSegment.startSeconds,
+    }),
+  ];
 }
 
 export function buildDummyClipRenderPlan(
@@ -151,17 +309,24 @@ export function buildDummyClipRenderPlan(
 ): ClipRenderPlan {
   const startSeconds = 0;
   const endSeconds = Math.min(transcript?.durationSeconds ?? 15, 15);
+  const segments = [
+    clipSegmentSchema.parse({
+      endSeconds,
+      id: "segment-1",
+      startSeconds,
+    }),
+  ];
 
   return clipRenderPlanSchema.parse({
-    captions: captionsForClip(transcript, startSeconds, endSeconds),
-    endSeconds,
+    captions: captionsForClip(transcript, segments, 30),
     id: "dummy-clip",
     output: {
       fps: 30,
       height: 1920,
       width: 1080,
     },
-    startSeconds,
+    schemaVersion: 2,
+    segments,
     title: "ClipForge dummy clip",
     uploadId,
   });
@@ -173,8 +338,11 @@ export function mergeClipRenderPlan(
   transcript?: Transcript,
 ) {
   const fallback = buildDummyClipRenderPlan(uploadId, transcript);
-  const startSeconds = clip?.startSeconds ?? fallback.startSeconds;
-  const endSeconds = clip?.endSeconds ?? fallback.endSeconds;
+  const segments = normalizeSegments(clip, fallback);
+  const output = {
+    ...fallback.output,
+    ...clip?.output,
+  };
 
   return clipRenderPlanSchema.parse({
     ...fallback,
@@ -182,15 +350,12 @@ export function mergeClipRenderPlan(
     captions: resolveClipCaptions(
       clip?.captions,
       transcript,
-      startSeconds,
-      endSeconds,
+      segments,
+      output.fps,
     ),
-    endSeconds,
-    output: {
-      ...fallback.output,
-      ...clip?.output,
-    },
-    startSeconds,
+    output,
+    schemaVersion: 2,
+    segments,
     uploadId,
   });
 }

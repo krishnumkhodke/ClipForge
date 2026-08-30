@@ -1,11 +1,18 @@
 import {
   AbsoluteFill,
-  OffthreadVideo,
+  Series,
   interpolate,
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import type { ClipCaption, ClipRenderPlan } from "../clip.js";
+import {
+  clipSegmentDurationInFrames,
+  clipTransitionDurationInFrames,
+  type ClipCaption,
+  type ClipRenderPlan,
+} from "../clip.js";
+import { ChapterCard } from "./ChapterCard.js";
+import { VideoSegment } from "./VideoSegment.js";
 
 export type ClipForgeClipProps = {
   clip: ClipRenderPlan;
@@ -23,28 +30,49 @@ export const ClipForgeClip = ({ clip, sourceUrl }: ClipForgeClipProps) => {
   const { fps } = useVideoConfig();
   const elapsedMs = (frame / fps) * 1000;
   const activeCaption = getActiveCaption(clip.captions, elapsedMs);
-  const trimBefore = Math.round(clip.startSeconds * fps);
-  const trimAfter = Math.round(clip.endSeconds * fps);
+  const captionFrame = activeCaption
+    ? frame - Math.round((activeCaption.startMs / 1000) * fps)
+    : 0;
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#080808" }}>
-      <OffthreadVideo
-        src={sourceUrl}
-        style={{
-          height: "100%",
-          objectFit: "cover",
-          width: "100%",
-        }}
-        trimAfter={trimAfter}
-        trimBefore={trimBefore}
-        volume={1}
-      />
-      <AbsoluteFill
-        style={{
-          background:
-            "linear-gradient(180deg, rgba(0,0,0,0.35) 0%, rgba(0,0,0,0) 30%, rgba(0,0,0,0.72) 100%)",
-        }}
-      />
+      <Series>
+        {clip.segments.flatMap((segment, index) => {
+          const transition = segment.transitionAfter;
+          const transitionDuration = clipTransitionDurationInFrames(
+            transition,
+            fps,
+          );
+
+          return [
+            <Series.Sequence
+              durationInFrames={clipSegmentDurationInFrames(segment, fps)}
+              key={`${segment.id}-${index}`}
+              premountFor={fps}
+            >
+              <VideoSegment
+                clip={clip}
+                segment={segment}
+                sourceUrl={sourceUrl}
+              />
+            </Series.Sequence>,
+            ...(transition?.kind === "card"
+              ? [
+                  <Series.Sequence
+                    durationInFrames={transitionDuration}
+                    key={`${segment.id}-${index}-transition`}
+                    premountFor={fps}
+                  >
+                    <ChapterCard
+                      durationInFrames={transitionDuration}
+                      title={transition.title ?? clip.title}
+                    />
+                  </Series.Sequence>,
+                ]
+              : []),
+          ];
+        })}
+      </Series>
       <div
         style={{
           alignItems: "center",
@@ -69,7 +97,7 @@ export const ClipForgeClip = ({ clip, sourceUrl }: ClipForgeClipProps) => {
               fontSize: 58,
               fontWeight: 800,
               lineHeight: 1.12,
-              opacity: interpolate(frame, [0, 8], [0, 1], {
+              opacity: interpolate(captionFrame, [0, 8], [0, 1], {
                 extrapolateLeft: "clamp",
                 extrapolateRight: "clamp",
               }),
@@ -80,22 +108,6 @@ export const ClipForgeClip = ({ clip, sourceUrl }: ClipForgeClipProps) => {
             {activeCaption.text}
           </div>
         ) : null}
-      </div>
-      <div
-        style={{
-          color: "rgba(255, 255, 255, 0.82)",
-          fontFamily:
-            'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-          fontSize: 30,
-          fontWeight: 700,
-          left: 56,
-          letterSpacing: 0,
-          position: "absolute",
-          right: 56,
-          top: 52,
-        }}
-      >
-        {clip.title}
       </div>
     </AbsoluteFill>
   );
