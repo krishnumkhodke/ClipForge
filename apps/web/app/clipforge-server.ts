@@ -180,6 +180,63 @@ function getCreatedTurnId(item: TurnStreamData) {
   return event.turnId;
 }
 
+function getEventId(item: TurnStreamData) {
+  return typeof item.event.id === "string" ? item.event.id : undefined;
+}
+
+async function waitForPersistedEvents(abortSignal?: AbortSignal) {
+  await new Promise<void>((resolve, reject) => {
+    const timeoutId = window.setTimeout(resolve, 500);
+
+    abortSignal?.addEventListener(
+      "abort",
+      () => {
+        window.clearTimeout(timeoutId);
+        reject(abortSignal.reason);
+      },
+      { once: true },
+    );
+  });
+}
+
+async function* replayPersistedTurnEvents({
+  abortSignal,
+  deliveredEventIds,
+  lastSequenceNumber,
+  server,
+  sessionId,
+  turnId,
+}: {
+  abortSignal?: AbortSignal;
+  deliveredEventIds: Set<string>;
+  lastSequenceNumber: number | undefined;
+  server: AgentUIServer;
+  sessionId: string;
+  turnId: string;
+}): AsyncIterable<TurnStreamData> {
+  await waitForPersistedEvents(abortSignal);
+
+  const events = await server.listEvents({
+    lastTurnId: turnId,
+    limit: 100,
+    sessionId,
+  });
+  let sequenceNumber = lastSequenceNumber ?? 0;
+
+  for (const item of [...events.data].reverse()) {
+    if (item.turnId !== turnId || deliveredEventIds.has(item.event.id)) {
+      continue;
+    }
+
+    sequenceNumber += 1;
+
+    yield {
+      event: item.event,
+      sequenceNumber,
+    };
+  }
+}
+
 export function createClipForgeServer(): AgentUIServer {
   const trueForgeServer = createTrueForgeAgentUIServer({
     baseUrl: TRUEFORGE_BASE_URL,
@@ -189,12 +246,17 @@ export function createClipForgeServer(): AgentUIServer {
     ...trueForgeServer,
     async *createTurn(request) {
       const augmentedRequest = await addClipForgeContextToTurnRequest(request);
+      const deliveredEventIds = new Set<string>();
       let lastSequenceNumber: number | undefined;
       let turnId: string | undefined;
       let sawTurnDone = false;
 
       try {
         for await (const item of trueForgeServer.createTurn(augmentedRequest)) {
+          const eventId = getEventId(item);
+          if (eventId) {
+            deliveredEventIds.add(eventId);
+          }
           lastSequenceNumber = item.sequenceNumber;
           turnId ??= getCreatedTurnId(item);
           sawTurnDone = sawTurnDone || item.event.type === "turn.done";
@@ -209,13 +271,30 @@ export function createClipForgeServer(): AgentUIServer {
           throw error;
         }
 
-        for await (const item of trueForgeServer.subscribeToTurn({
-          abortSignal: request.abortSignal,
-          afterSequenceNumber: lastSequenceNumber,
-          sessionId: request.sessionId,
-          turnId,
-        })) {
-          yield redactClipForgeContext(item);
+        try {
+          for await (const item of trueForgeServer.subscribeToTurn({
+            abortSignal: request.abortSignal,
+            afterSequenceNumber: lastSequenceNumber,
+            sessionId: request.sessionId,
+            turnId,
+          })) {
+            const eventId = getEventId(item);
+            if (eventId) {
+              deliveredEventIds.add(eventId);
+            }
+            yield redactClipForgeContext(item);
+          }
+        } catch {
+          for await (const item of replayPersistedTurnEvents({
+            abortSignal: request.abortSignal,
+            deliveredEventIds,
+            lastSequenceNumber,
+            server: trueForgeServer,
+            sessionId: request.sessionId,
+            turnId,
+          })) {
+            yield redactClipForgeContext(item);
+          }
         }
       }
     },

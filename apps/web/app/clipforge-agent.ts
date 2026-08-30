@@ -5,7 +5,7 @@ import type { AgentSpec } from "@truefoundry/trueforge-ui";
 const CLIPFORGE_INSTRUCTIONS_MARKER = "[ClipForge tool contract]";
 
 export const CLIPFORGE_TURN_TOOL_CONTEXT =
-  "ClipForge can currently use get_transcript and render_clip for the focused video. render_clip supports timing, title, captions, output width, output height, and fps only. Do not offer unsupported rendering controls such as subtitle styling, fonts, colors, crop mode, transitions, music, B-roll, thumbnails, hooks, effects, or multi-clip sequences.";
+  "ClipForge can currently use get_transcript and render_clip for the focused video. render_clip supports timing, title, captions as true/false or explicit caption segments, output width, output height, and fps only. Do not offer unsupported rendering controls such as subtitle styling, fonts, colors, crop mode, transitions, music, B-roll, thumbnails, hooks, effects, or multi-clip sequences.";
 
 export const CLIPFORGE_AGENT_INSTRUCTIONS = `${CLIPFORGE_INSTRUCTIONS_MARKER}
 
@@ -14,7 +14,7 @@ You are ClipForge, a focused video clipping assistant.
 Current available media workflow:
 - Use get_transcript with the current sessionId to read a timestamped transcript for the focused uploaded video.
 - Use render_clip with the current sessionId and a clip object to render one vertical MP4 from that focused video.
-- The clip object supports id, title, startSeconds, endSeconds, optional captions, and optional output width, height, and fps.
+- The clip object supports id, title, startSeconds, endSeconds, optional captions, and optional output width, height, and fps. Use captions: true for transcript captions, captions: false for no captions, or provide an explicit caption segment array.
 - The current renderer uses one fixed template: vertical output by default, source video cropped to fill, title near the top, and burned-in captions using the built-in caption style.
 
 Important limitations:

@@ -76,7 +76,7 @@ const getTranscriptInputSchema = {
 const renderClipInputSchema = {
   ...uploadReferenceInputSchema,
   clip: renderClipRequestSchema.shape.clip.describe(
-    "Clip render plan. Supported fields are id, title, startSeconds, endSeconds, optional captions, and optional output width, height, and fps. Unsupported today: caption style, font, color, crop mode, transitions, music, B-roll, thumbnails, and multi-clip sequences.",
+    "Clip render plan. Supported fields are id, title, startSeconds, endSeconds, captions, and output width, height, and fps. captions may be true for transcript captions, false for no captions, or an explicit caption array. Unsupported today: caption style, font, color, crop mode, transitions, music, B-roll, thumbnails, and multi-clip sequences.",
   ),
 };
 
@@ -172,7 +172,7 @@ export function createClipForgeMcpServer(handlers: ClipForgeMcpHandlers) {
         readOnlyHint: false,
       },
       description:
-        "Render one uploaded video segment into an MP4 using ClipForge's current fixed template. This tool can choose timing, title, captions, width, height, and fps only; it cannot customize subtitle styling, fonts, colors, crop strategy, transitions, music, B-roll, thumbnails, or multi-clip sequences.",
+        "Render one uploaded video segment into an MP4 using ClipForge's current fixed template. This tool can choose timing, title, captions on/off or explicit caption segments, width, height, and fps only; it cannot customize subtitle styling, fonts, colors, crop strategy, transitions, music, B-roll, thumbnails, or multi-clip sequences.",
       inputSchema: renderClipInputSchema,
       title: "Render Clip",
     },
