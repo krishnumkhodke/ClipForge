@@ -180,7 +180,16 @@ function getCreatedTurnId(item: TurnStreamData) {
   return event.turnId;
 }
 
-function getEventId(item: TurnStreamData) {
+function getDurablyDeliveredLiveEventId(item: TurnStreamData) {
+  // The live model.message is a placeholder and its deltas share the same ID.
+  // Only the persisted model.message contains the authoritative merged content.
+  if (
+    item.event.type === "model.message" ||
+    item.event.type === "model.message.delta"
+  ) {
+    return undefined;
+  }
+
   return typeof item.event.id === "string" ? item.event.id : undefined;
 }
 
@@ -205,14 +214,14 @@ async function waitForPersistedEvents(abortSignal?: AbortSignal) {
 
 async function* replayPersistedTurnEvents({
   abortSignal,
-  deliveredEventIds,
+  deliveredDurableEventIds,
   lastSequenceNumber,
   server,
   sessionId,
   turnId,
 }: {
   abortSignal?: AbortSignal;
-  deliveredEventIds: Set<string>;
+  deliveredDurableEventIds: Set<string>;
   lastSequenceNumber: number | undefined;
   server: AgentUIServer;
   sessionId: string;
@@ -231,11 +240,14 @@ async function* replayPersistedTurnEvents({
     let sawTurnDone = false;
 
     for (const item of [...events.data].reverse()) {
-      if (item.turnId !== turnId || deliveredEventIds.has(item.event.id)) {
+      if (
+        item.turnId !== turnId ||
+        deliveredDurableEventIds.has(item.event.id)
+      ) {
         continue;
       }
 
-      deliveredEventIds.add(item.event.id);
+      deliveredDurableEventIds.add(item.event.id);
       sequenceNumber += 1;
       sawTurnDone = sawTurnDone || item.event.type === "turn.done";
 
@@ -260,7 +272,7 @@ export function createClipForgeServer(): AgentUIServer {
     ...trueForgeServer,
     async *createTurn(request) {
       const augmentedRequest = await addClipForgeContextToTurnRequest(request);
-      const deliveredEventIds = new Set<string>();
+      const deliveredDurableEventIds = new Set<string>();
       let lastSequenceNumber: number | undefined;
       let turnId: string | undefined;
       let sawTurnDone = false;
@@ -268,9 +280,9 @@ export function createClipForgeServer(): AgentUIServer {
 
       try {
         for await (const item of trueForgeServer.createTurn(augmentedRequest)) {
-          const eventId = getEventId(item);
+          const eventId = getDurablyDeliveredLiveEventId(item);
           if (eventId) {
-            deliveredEventIds.add(eventId);
+            deliveredDurableEventIds.add(eventId);
           }
           lastSequenceNumber = item.sequenceNumber;
           turnId ??= getCreatedTurnId(item);
@@ -299,9 +311,9 @@ export function createClipForgeServer(): AgentUIServer {
           sessionId: request.sessionId,
           turnId,
         })) {
-          const eventId = getEventId(item);
+          const eventId = getDurablyDeliveredLiveEventId(item);
           if (eventId) {
-            deliveredEventIds.add(eventId);
+            deliveredDurableEventIds.add(eventId);
           }
           lastSequenceNumber = item.sequenceNumber;
           sawTurnDone = sawTurnDone || item.event.type === "turn.done";
@@ -317,7 +329,7 @@ export function createClipForgeServer(): AgentUIServer {
 
       for await (const item of replayPersistedTurnEvents({
         abortSignal: request.abortSignal,
-        deliveredEventIds,
+        deliveredDurableEventIds,
         lastSequenceNumber,
         server: trueForgeServer,
         sessionId: request.sessionId,
